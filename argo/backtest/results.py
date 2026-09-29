@@ -28,10 +28,16 @@ class BacktestResult:
     avg_trade_pnl: float
     params: Dict[str, Any]
     equity_curve: List[Dict[str, Any]] = field(default_factory=list)
+    run_id: Optional[int] = None
+
+    def with_run_id(self, run_id: int) -> "BacktestResult":
+        from dataclasses import replace
+        return replace(self, run_id=run_id)
 
     def to_dict(self) -> Dict[str, Any]:
         """Serializes result metrics into a clean dictionary."""
         return {
+            "run_id": self.run_id,
             "instance_id": self.instance_id,
             "strategy_name": self.strategy_name,
             "instrument_id": self.instrument_id,

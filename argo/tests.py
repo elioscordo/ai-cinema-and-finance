@@ -1,12 +1,12 @@
 from django.test import TransactionTestCase
 from argo.models import InstrumentGroup, Instrument, AssetClass
-from argo.schemas import SymbolsSchema, SymbolItemSchema
+from argo.schemas import InstrumentsSchema, InstrumentSchema
 from argo.instruments.search import InteractiveBrokersSearchService, ASSET_CLASS_TO_SEC_TYPE
         
 
-class SymbolsSchemaLiveTest(TransactionTestCase):
+class InstrumentsSchemaLiveTest(TransactionTestCase):
     """
-    Live integration test for SymbolsSchema using the real IB Gateway/TWS service.
+    Live integration test for InstrumentsSchema using the real IB Gateway/TWS service.
     """
 
     def setUp(self):
@@ -24,10 +24,10 @@ class SymbolsSchemaLiveTest(TransactionTestCase):
 
     def test_sync_model_live_search(self):
         # 1 valid real symbol and 1 non-existent symbol
-        schema = SymbolsSchema(
-            symbols=[
-                SymbolItemSchema(symbol="BTC/USD"),
-                SymbolItemSchema(symbol="NONEXISTENT_XYZ_999", venue="SMART", currency="USD"),
+        schema = InstrumentsSchema(
+            instruments=[
+                InstrumentSchema(symbol="BTC/USD"),
+                InstrumentSchema(symbol="NONEXISTENT_XYZ_999", venue="SMART", currency="USD"),
             ]
         )
 

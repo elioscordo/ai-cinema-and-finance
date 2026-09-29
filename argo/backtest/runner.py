@@ -1,8 +1,13 @@
+import contextlib
 import datetime
+import io
 import importlib
 import inspect
 import logging
 import math
+import os
+import shutil
+import tempfile
 from typing import Dict, Any, Optional, Tuple
 from decimal import Decimal
 
@@ -19,6 +24,23 @@ from argo.backtest.data_loader import BacktestDataLoader
 from argo.backtest.results import BacktestResult
 
 logger = logging.getLogger("argo.backtest")
+
+
+class _LogCaptureHandler(logging.Handler):
+    """In-memory logging handler capturing logs during backtest execution."""
+    def __init__(self):
+        super().__init__()
+        self.buffer = io.StringIO()
+        self.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s [%(name)s]: %(message)s"))
+
+    def emit(self, record):
+        try:
+            self.buffer.write(self.format(record) + "\n")
+        except Exception:
+            self.handleError(record)
+
+    def getvalue(self) -> str:
+        return self.buffer.getvalue()
 
 
 class StrategyBacktestRunner:
@@ -38,31 +60,115 @@ class StrategyBacktestRunner:
         start: datetime.datetime,
         end: datetime.datetime,
         params_override: Optional[Dict[str, Any]] = None,
+        backtest=None,
+        save_run: bool = True,
     ) -> BacktestResult:
         """Executes a backtest for the specified StrategyInstance."""
-        strategy_class, config_class = self._load_strategy_classes(instance.strategy_model.class_path)
-        instrument = NautilusInstrumentFactory.create(instance.instrument)
-        bar_type = self._resolve_bar_type(instance.params.get("bar_type"), instrument.id)
+        if not instance.instrument:
+            raise ValueError(f"StrategyInstance {instance} has no associated instruments.")
 
-        # Build engine & environment
-        engine = self._build_engine(instrument.id.venue, instance.instrument.currency or "USD")
-        engine.add_instrument(instrument)
+        temp_log_dir = tempfile.mkdtemp(prefix="nautilus_run_log_")
 
-        # Load & feed historical bars ensuring AggregationSource.EXTERNAL
-        bars = self._load_simulation_bars(instance, instrument.id, bar_type, start, end)
-        engine.add_data(bars)
+        # Set up Python log capture covering entire run
+        log_capture = _LogCaptureHandler()
+        log_capture.setLevel(logging.DEBUG)
+        watched_loggers = [
+            logging.getLogger(),
+            logging.getLogger("argo"),
+            logging.getLogger("argo.backtest"),
+            logging.getLogger("nautilus_trader"),
+        ]
+        for l in watched_loggers:
+            l.addHandler(log_capture)
 
-        # Instantiate strategy with merged params and normalized bar_type
-        merged_params = {**(instance.params or {}), **(params_override or {})}
-        merged_params["bar_type"] = str(bar_type)
-        strategy = self._instantiate_strategy(strategy_class, config_class, instrument.id.value, bar_type, merged_params)
-        engine.add_strategy(strategy)
+        stdout_buf = io.StringIO()
 
-        # Run simulation
-        engine.run()
+        try:
+            instrument = NautilusInstrumentFactory.create(instance.instrument)
+            bar_type = self._resolve_bar_type((instance.params or {}).get("bar_type"), instrument.id)
 
-        # Compile and return performance result
-        return self._compile_result(engine, instance, instrument, start, end, merged_params, bars)
+            # Build engine & register all required venues
+            currency_str = instance.instrument.currency or "USD"
+            engine = self._build_engine(currency_code=currency_str, log_dir=temp_log_dir)
+            registered_venues: set[Venue] = set()
+
+            primary_venue = Venue(instance.instrument.venue or "SMART")
+            self._add_venue(engine, primary_venue, currency_str, registered_venues)
+
+            # Register all instruments associated with this instance and their respective venues
+            all_instruments = instance.get_instruments() or [instance.instrument]
+            for instr in all_instruments:
+                n_instr = NautilusInstrumentFactory.create(instr)
+                self._add_venue(engine, n_instr.id.venue, currency_str, registered_venues)
+                engine.add_instrument(n_instr)
+
+            # Load & feed historical bars ensuring AggregationSource.EXTERNAL
+            bars = self._load_simulation_bars(instance, instrument.id, bar_type, start, end)
+            engine.add_data(bars)
+
+            # Instantiate strategy via StrategyInstance model (zero parameter assumptions)
+            merged_params = {**(instance.params or {}), **(params_override or {})}
+            strategy = instance.instantiate_strategy(params_override=merged_params, bar_type=bar_type)
+            engine.add_strategy(strategy)
+
+            # Run simulation capturing stdout/stderr
+            with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stdout_buf):
+                engine.run()
+
+            # Compile performance result
+            result = self._compile_result(engine, instance, instrument, start, end, merged_params, bars)
+
+            if save_run:
+                # Harvest file logs from Nautilus
+                nautilus_file_log = ""
+                if os.path.exists(temp_log_dir):
+                    for fname in sorted(os.listdir(temp_log_dir)):
+                        fpath = os.path.join(temp_log_dir, fname)
+                        if os.path.isfile(fpath):
+                            try:
+                                with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                                    nautilus_file_log += f.read() + "\n"
+                            except Exception:
+                                pass
+
+                # Assemble complete log
+                final_log = self._assemble_log(
+                    instance=instance,
+                    instrument=instrument,
+                    start=start,
+                    end=end,
+                    bars_count=len(bars),
+                    engine=engine,
+                    result=result,
+                    python_log=log_capture.getvalue(),
+                    nautilus_file_log=nautilus_file_log,
+                    stdout_log=stdout_buf.getvalue(),
+                )
+
+                html_report = self._generate_html_report(engine)
+                strategy_code = self._extract_strategy_code(instance, strategy)
+                final_config = self._extract_final_config(instance, strategy, merged_params)
+
+                run_record = self._persist_run(
+                    backtest=backtest,
+                    instance=instance,
+                    config=final_config,
+                    code=strategy_code,
+                    log=final_log,
+                    html_report=html_report,
+                    result=result,
+                    start=start,
+                    end=end,
+                )
+                if run_record:
+                    result = result.with_run_id(run_record.id)
+
+            return result
+        finally:
+            for l in watched_loggers:
+                l.removeHandler(log_capture)
+            if os.path.exists(temp_log_dir):
+                shutil.rmtree(temp_log_dir, ignore_errors=True)
 
     def _resolve_bar_type(self, raw_bar_type: Optional[str], instrument_id) -> BarType:
         """Resolves BarType ensuring external aggregation source required by BacktestEngine."""
@@ -120,18 +226,41 @@ class StrategyBacktestRunner:
         ]
 
     def _load_strategy_classes(self, class_path: str) -> Tuple[type, Optional[type]]:
-        module_path, class_name = class_path.rsplit(".", 1)
-        module = importlib.import_module(module_path)
-        strategy_class = getattr(module, class_name)
-        config_class = getattr(module, f"{class_name}Config", None)
-        return strategy_class, config_class
+        from argo.utils import resolve_strategy_classes
+        return resolve_strategy_classes(class_path)
 
-    def _build_engine(self, venue: Venue, currency_code: str) -> BacktestEngine:
+    def _build_engine(self, venue: Optional[Venue] = None, currency_code: str = "USD", log_dir: Optional[str] = None) -> BacktestEngine:
+        logging_kwargs = {"log_level": self.log_level}
+        if log_dir:
+            sig = inspect.signature(LoggingConfig)
+            if "log_to_file" in sig.parameters:
+                logging_kwargs["log_to_file"] = True
+            if "log_directory" in sig.parameters:
+                logging_kwargs["log_directory"] = str(log_dir)
+            elif "directory" in sig.parameters:
+                logging_kwargs["directory"] = str(log_dir)
+
         config = BacktestEngineConfig(
             trader_id=TraderId("BACKTEST-TRADER"),
-            logging=LoggingConfig(log_level=self.log_level),
+            logging=LoggingConfig(**logging_kwargs),
         )
         engine = BacktestEngine(config=config)
+        if venue is not None:
+            self._add_venue(engine, venue, currency_code)
+        return engine
+
+    def _add_venue(
+        self,
+        engine: BacktestEngine,
+        venue: Venue,
+        currency_code: str = "USD",
+        registered: Optional[set[Venue]] = None,
+    ) -> None:
+        """Registers a venue on the engine if not already registered."""
+        if registered is not None:
+            if venue in registered:
+                return
+            registered.add(venue)
         engine.add_venue(
             venue=venue,
             oms_type=OmsType.NETTING,
@@ -139,38 +268,32 @@ class StrategyBacktestRunner:
             base_currency=Currency.from_str(currency_code),
             starting_balances=[Money(self.starting_balance, Currency.from_str(currency_code))],
         )
-        return engine
 
-    def _instantiate_strategy(self, strat_cls, cfg_cls, instr_id: str, bar_type: BarType, params: Dict[str, Any]):
-        cleaned_params = {
-            k: v for k, v in (params or {}).items()
-            if k not in ["instrument_id", "bar_type", "actor_path", "config_path", "config"]
-        }
+    def _instantiate_strategy(self, strat_cls, cfg_cls, instr_id: str, bar_type: BarType, params: Dict[str, Any], instance=None):
+        if instance is not None and hasattr(instance, "instantiate_strategy"):
+            return instance.instantiate_strategy(params_override=params, bar_type=bar_type)
+
+        target = cfg_cls or strat_cls.__init__
+        sig = inspect.signature(target)
+        valid_params = set(sig.parameters.keys())
+        if inspect.isclass(target) and hasattr(target, "__dataclass_fields__"):
+            valid_params |= set(target.__dataclass_fields__.keys())
+
+        cfg_kwargs = {}
+        for k, v in (params or {}).items():
+            if k not in ["actor_path", "config_path", "config"] and k in valid_params:
+                cfg_kwargs[k] = v
+
+        if "instrument_id" in valid_params and "instrument_id" not in cfg_kwargs and instr_id:
+            cfg_kwargs["instrument_id"] = str(instr_id)
+        if "bar_type" in valid_params and "bar_type" not in cfg_kwargs and bar_type:
+            cfg_kwargs["bar_type"] = str(bar_type)
+
         if cfg_cls:
-            sig = inspect.signature(cfg_cls)
-            valid_params = set(sig.parameters.keys())
-            if hasattr(cfg_cls, "__dataclass_fields__"):
-                valid_params |= set(cfg_cls.__dataclass_fields__.keys())
-
-            cfg_kwargs = {}
-            if "instrument_id" in valid_params:
-                cfg_kwargs["instrument_id"] = instr_id
-            if "bar_type" in valid_params:
-                cfg_kwargs["bar_type"] = str(bar_type)
-
-            has_var_kwargs = any(
-                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-            )
-            if has_var_kwargs:
-                cfg_kwargs.update(cleaned_params)
-            else:
-                for k, v in cleaned_params.items():
-                    if k in valid_params:
-                        cfg_kwargs[k] = v
-
             config = cfg_cls(**cfg_kwargs)
-            return strat_cls(config=config)
-        return strat_cls(instrument_id=instr_id, bar_type=bar_type, **cleaned_params)
+            strat_sig = inspect.signature(strat_cls.__init__)
+            return strat_cls(config=config) if "config" in strat_sig.parameters else strat_cls(config)
+        return strat_cls(**cfg_kwargs)
 
     @staticmethod
     def _to_float(val: Any) -> float:
@@ -267,3 +390,188 @@ class StrategyBacktestRunner:
         sortino = sharpe * 1.2
         max_dd = min(0.35, max(0.02, vol * 2.5))
         return round(sharpe, 2), round(sortino, 2), round(max_dd, 4)
+
+    def _extract_strategy_code(self, instance, strategy) -> str:
+        """Extracts source code of the strategy from model or class inspection."""
+        code = ""
+        if instance and instance.strategy_model:
+            code = instance.strategy_model._get_strategy_source()
+        if not code and strategy:
+            try:
+                code = inspect.getsource(strategy.__class__)
+            except Exception:
+                code = ""
+        return code
+
+    def _extract_final_config(self, instance, strategy, merged_params: Dict[str, Any]) -> Dict[str, Any]:
+        """Extracts final configuration applied to strategy, ensuring JSON serializability."""
+        import dataclasses
+        cfg_dict = {}
+        if hasattr(strategy, "config") and strategy.config is not None:
+            cfg = strategy.config
+            if hasattr(cfg, "to_dict") and callable(cfg.to_dict):
+                try:
+                    cfg_dict = cfg.to_dict()
+                except Exception:
+                    pass
+            elif hasattr(cfg, "as_dict") and callable(cfg.as_dict):
+                try:
+                    cfg_dict = cfg.as_dict()
+                except Exception:
+                    pass
+            if not cfg_dict and dataclasses.is_dataclass(cfg):
+                try:
+                    cfg_dict = dataclasses.asdict(cfg)
+                except Exception:
+                    pass
+            if not cfg_dict and hasattr(cfg, "__dict__"):
+                cfg_dict = {k: v for k, v in cfg.__dict__.items() if not k.startswith("_")}
+
+        combined = {**merged_params, **cfg_dict}
+        return self._sanitize_json(combined)
+
+    def _sanitize_json(self, data: Any) -> Any:
+        """Recursively ensures data structures are valid JSON serializable types."""
+        if isinstance(data, dict):
+            return {str(k): self._sanitize_json(v) for k, v in data.items()}
+        if isinstance(data, (list, tuple, set)):
+            return [self._sanitize_json(v) for v in data]
+        if isinstance(data, (int, float, bool, type(None))):
+            return data
+        if isinstance(data, Decimal):
+            return float(data)
+        return str(data)
+
+    def _generate_html_report(self, engine: BacktestEngine) -> str:
+        """Generates interactive NautilusTrader HTML tearsheet report."""
+        import tempfile
+        import os
+        try:
+            from nautilus_trader.analysis.tearsheet import create_tearsheet
+            sig = inspect.signature(create_tearsheet)
+            with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tmp:
+                tmp_path = tmp.name
+            try:
+                if "output_path" in sig.parameters:
+                    res = create_tearsheet(engine=engine, output_path=tmp_path)
+                elif "path" in sig.parameters:
+                    res = create_tearsheet(engine=engine, path=tmp_path)
+                elif "filename" in sig.parameters:
+                    res = create_tearsheet(engine=engine, filename=tmp_path)
+                else:
+                    res = create_tearsheet(engine)
+
+                if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
+                    with open(tmp_path, "r", encoding="utf-8") as f:
+                        return f.read()
+                if isinstance(res, str) and len(res.strip()) > 0:
+                    return res
+                return ""
+            finally:
+                if os.path.exists(tmp_path):
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+        except Exception as e:
+            logger.warning(f"Could not generate Nautilus tearsheet report: {e}")
+            return f"<!-- Tearsheet generation failed: {e} -->"
+
+    def _assemble_log(
+        self,
+        instance,
+        instrument,
+        start: datetime.datetime,
+        end: datetime.datetime,
+        bars_count: int,
+        engine: BacktestEngine,
+        result: BacktestResult,
+        python_log: str,
+        nautilus_file_log: str,
+        stdout_log: str,
+    ) -> str:
+        """Assembles a comprehensive, human-readable execution log for the backtest run."""
+        orders = engine.trader.generate_orders_report()
+        fills = engine.trader.generate_order_fills_report()
+        positions = engine.trader.generate_positions_report()
+
+        orders_count = len(orders) if orders is not None else 0
+        fills_count = len(fills) if fills is not None else 0
+        pos_count = len(positions) if positions is not None else 0
+
+        header_lines = [
+            "=" * 70,
+            f"BACKTEST EXECUTION RUN LOG",
+            f"Strategy Instance: {instance}",
+            f"Primary Instrument: {instrument.id}",
+            f"Simulation Window: {start.strftime('%Y-%m-%d %H:%M')} -> {end.strftime('%Y-%m-%d %H:%M')} UTC",
+            f"Bars Processed: {bars_count:,}",
+            f"Execution Summary: Orders: {orders_count} | Fills: {fills_count} | Closed Positions: {pos_count}",
+            f"Performance: Net PnL: ${result.total_pnl:,.2f} ({result.return_pct:.2%}) | Win Rate: {result.win_rate:.1%}",
+            f"Risk Metrics: Sharpe: {result.sharpe_ratio:.2f} | Sortino: {result.sortino_ratio:.2f} | Max DD: {result.max_drawdown_pct:.2%}",
+            "=" * 70,
+        ]
+
+        sections = ["\n".join(header_lines)]
+
+        # Append Python logs (argo logging, data inspection, execution diagnostic)
+        if python_log.strip():
+            sections.append("### Runtime Application Log:\n" + python_log.strip())
+
+        # Append Nautilus Trader native logs
+        if nautilus_file_log.strip():
+            sections.append("### Nautilus Trader Engine Log:\n" + nautilus_file_log.strip())
+
+        # Append captured stdout if distinct
+        clean_stdout = stdout_log.strip()
+        if clean_stdout and clean_stdout not in python_log and clean_stdout not in nautilus_file_log:
+            sections.append("### Console Output:\n" + clean_stdout)
+
+        # If fills occurred, append fills summary table
+        if fills is not None and not fills.empty:
+            try:
+                cols = [c for c in ["ts_event", "instrument_id", "order_side", "last_qty", "last_px"] if c in fills.columns]
+                preview = fills[cols].to_string(index=False) if cols else fills.to_string(index=False)
+                sections.append("### Executed Fills:\n" + preview)
+            except Exception:
+                pass
+
+        return "\n\n".join(sections)
+
+    def _persist_run(
+        self,
+        backtest,
+        instance,
+        config: Dict[str, Any],
+        code: str,
+        log: str,
+        html_report: str,
+        result: BacktestResult,
+        start: datetime.datetime,
+        end: datetime.datetime,
+    ):
+        """Creates and persists a BacktestRun record in the database."""
+        try:
+            from argo.models import BacktestRun
+            return BacktestRun.objects.create(
+                backtest=backtest,
+                strategy_instance=instance,
+                config=config,
+                code=code,
+                log=log,
+                html_report=html_report,
+                total_pnl=Decimal(str(result.total_pnl)),
+                return_pct=result.return_pct,
+                sharpe_ratio=result.sharpe_ratio,
+                sortino_ratio=result.sortino_ratio,
+                calmar_ratio=result.calmar_ratio,
+                max_drawdown_pct=result.max_drawdown_pct,
+                profit_factor=result.profit_factor,
+                win_rate=result.win_rate,
+                total_trades=result.total_trades,
+                start_date=start,
+                end_date=end,
+            )
+        except Exception as e:
+            logger.error(f"Failed to persist BacktestRun record: {e}", exc_info=True)
+            return None

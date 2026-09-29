@@ -62,6 +62,7 @@ INSTALLED_APPS = [
     'scene.apps.SceneConfig',
     'agent.apps.AgentConfig',
     'task',
+    'argo.apps.ArgoConfig',
     'import_export',
     'unfold.contrib.import_export',
     'django_celery_beat',
@@ -472,6 +473,8 @@ TASK_TYPE_GENERATE_SCENE_COMICS = 'generate_scene_comics'
 TASK_TYPE_EXTRACT_SCENE = 'extract_scene'
 TASK_TYPE_SYNC_EXPORT = 'sync_export'
 TASK_TYPE_SYNC_IMPORT = 'sync_import'
+TASK_TYPE_EXEC_FUNC = 'exec_func'
+TASK_EXECUTE_FUNC = TASK_TYPE_EXEC_FUNC
 
 
 
@@ -501,6 +504,7 @@ TASK_DELEGATES = {
     TASK_TYPE_SYNC_EXPORT: 'scene.tasks.sync.TaskSyncExport',
     TASK_TYPE_SYNC_IMPORT: 'scene.tasks.sync.TaskSyncImport',
     TASK_TYPE_VIDEO_RENDER: 'scene.tasks.render.VideoRender',
+    TASK_TYPE_EXEC_FUNC: 'task.tasks.TaskExecuteFunc',
 }
 IMPORT_EXPORT_TMP_STORAGE_CLASS = 'import_export.tmp_storages.MediaStorage'
 TASK_TYPE_CHOICES = (
@@ -523,7 +527,7 @@ TASK_TYPE_CHOICES = (
     (TASK_TYPE_SYNC_EXPORT, _("Sync Export")),
     (TASK_TYPE_SYNC_IMPORT, _("Sync Import")),
     (TASK_TYPE_GENERATE_SCENE, _("Generate Scene Video")),
-
+    (TASK_TYPE_EXEC_FUNC, _("Execute Function")),
 )
 
 TASK_RETRY_EXCEPTIONS = [
@@ -532,7 +536,7 @@ TASK_RETRY_EXCEPTIONS = [
 
 # --- Configuración de archivos estáticos ---
 import os
-STATIC_URL = 'static/'
+STATIC_URL = '/static/'
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
 # Agent Structured Output Schema Settings
@@ -546,6 +550,7 @@ SCHEMA_SYMBOLS = "symbols"
 SCHEMA_INSTANCES = "instances"
 SCHEMA_TRANSLATION = "translation"
 SCHEMA_OPTIMIZE = "optimize"
+SCHEMA_INSTRUMENTS = "instruments"
 
 AGENT_SCHEMA_CHOICES = [
     (SCHEMA_MULTI_SCENE, _("Multi Scene Storyboard")),
@@ -558,6 +563,7 @@ AGENT_SCHEMA_CHOICES = [
     (SCHEMA_INSTANCES, _("Strategy Instances")),
     (SCHEMA_TRANSLATION, _("Scene Translation")),
     (SCHEMA_OPTIMIZE, _("Optimize Strategy Instance")),
+    (SCHEMA_INSTRUMENTS, _("Instruments")),
 ]
 
 AGENT_SCHEMAS = {
@@ -567,10 +573,11 @@ AGENT_SCHEMAS = {
     SCHEMA_CREATE_INSTRUCTIONS: "agent.schemas.CreateInstructionsSchema",
     SCHEMA_STORY_SCENES: "scene.schemas.StoryScenesSchema",
     SCHEMA_ASSETS: "scene.schemas.AssetsSchema",
-    SCHEMA_SYMBOLS: "argo.schemas.SymbolsSchema",
+    SCHEMA_SYMBOLS: "argo.schemas.InstrumentsSchema",
     SCHEMA_INSTANCES: "argo.schemas.StrategyInstancesSchema",
     SCHEMA_TRANSLATION: "scene.schemas.SceneTranslationSchema",
     SCHEMA_OPTIMIZE: "argo.schemas.StrategyInstanceOptimizeSchema",
+    SCHEMA_INSTRUMENTS: "argo.schemas.InstrumentsSchema",
 }
 
 

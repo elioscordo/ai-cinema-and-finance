@@ -294,9 +294,9 @@ class CharacterAdmin(ChangelistScrollToEditedMixin, PromptMarkdownMixin, SimpleH
 @admin.register(Background)
 class BackgroundAdmin(ChangelistScrollToEditedMixin, PromptMarkdownMixin, SimpleHistoryAdmin, AjaxSectionAdminMixin, StoryFilterMixin, AdminActionsMixin, AdminLinker, PromptPreviewMixin, AjaxTaskModelAdmin):
     show_full_result_count = False
-    list_display = ('name', 'pic', 'prompt','link_story', 'last_tasks')
+    list_display = ('name', 'pic', 'prompt', 'prompt_refine', 'link_story', 'last_tasks')
     list_refresh = ['pic']
-    list_editable = ('prompt',)
+    list_editable = ('prompt', 'prompt_refine')
     list_display_links = ('name',)
     autocomplete_fields = ['story']
     list_filter = ['story', 'scenes', 'id']

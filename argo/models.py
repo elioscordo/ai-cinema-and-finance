@@ -177,16 +177,41 @@ class Strategy(models.Model, GetContentsMixin):
                 parts.append(config_summary)
         return parts
 
+    def get_source_file_path(self) -> str | None:
+        """Returns the file path of the strategy module/class on the filesystem."""
+        try:
+            import importlib, inspect
+            if not self.class_path or "." not in self.class_path:
+                return None
+            module_path, class_name = self.class_path.rsplit(".", 1)
+            module = importlib.import_module(module_path)
+            cls_obj = getattr(module, class_name, None)
+            if cls_obj is not None:
+                src_file = inspect.getsourcefile(cls_obj)
+                if src_file:
+                    return src_file
+            return inspect.getsourcefile(module)
+        except Exception:
+            return None
+
+    def save_strategy_source(self, code: str) -> None:
+        """Saves source code to the strategy module file on the filesystem."""
+        file_path = self.get_source_file_path()
+        if not file_path:
+            raise ValueError(f"Could not locate source file for strategy '{self.class_path}'")
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(code)
+
     def _get_strategy_source(self) -> str:
         """Loads the complete source code of the strategy module including optimization tips and docstrings."""
         try:
-            import importlib, inspect
-            module_path, class_name = self.class_path.rsplit(".", 1)
-            module = importlib.import_module(module_path)
-            source_file = inspect.getsourcefile(module)
-            if source_file:
-                with open(source_file, "r", encoding="utf-8") as f:
+            file_path = self.get_source_file_path()
+            if file_path:
+                with open(file_path, "r", encoding="utf-8") as f:
                     return f.read()
+            import importlib, inspect
+            module_path, _ = self.class_path.rsplit(".", 1)
+            module = importlib.import_module(module_path)
             return inspect.getsource(module)
         except Exception:
             return ""
@@ -194,10 +219,9 @@ class Strategy(models.Model, GetContentsMixin):
     def _get_config_summary(self) -> str:
         """Inspects and returns configuration parameter specifications for this strategy."""
         try:
-            import importlib, inspect
-            module_path, class_name = self.class_path.rsplit(".", 1)
-            module = importlib.import_module(module_path)
-            config_class = getattr(module, f"{class_name}Config", None)
+            import inspect
+            from .utils import resolve_strategy_classes
+            _, config_class = resolve_strategy_classes(self.class_path)
             if not config_class:
                 return ""
             doc = inspect.getdoc(config_class) or ""
@@ -362,23 +386,26 @@ class StrategyInstance(AfterSaveActionMixin, models.Model, GetContentsMixin, Tas
     PRESET_OPTIMIZE = "optimize"
 
     ACTION_OPTIMIZE = f"{TASK_TEXT_GENERATE}-preset-{PRESET_OPTIMIZE}-schema-optimize"
+    ACTION_INSTANTIATE_STRATEGY = f"{settings.TASK_EXECUTE_FUNC}-func-instantiate_strategy"
 
     ACTION_CHOICES = (
         (ACTION_OPTIMIZE, _("Optimize Parameters & Instrument")),
+        (ACTION_INSTANTIATE_STRATEGY, _("Instantiate Strategy")),
     ) + getattr(settings, 'COMMON_TEXT_ACTION_CHOICES', ())
+
+    ACTIONS_NO_INPUT = (ACTION_INSTANTIATE_STRATEGY,)
 
     AGENT_PRESETS = (
         (PRESET_OPTIMIZE, _("Optimize")),
     ) + getattr(settings, 'COMMON_TEXT_AGENT_PRESETS', ())
 
     strategy_model = models.ForeignKey(Strategy, on_delete=models.CASCADE, related_name='instances', null=True, blank=True)
-    instrument = models.ForeignKey(
+    instruments = models.ManyToManyField(
         'Instrument',
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
+        through='StrategyInstrument',
         related_name='strategy_instances',
-        help_text=_("The instrument this strategy instance trades.")
+        blank=True,
+        help_text=_("Instruments associated with this strategy instance.")
     )
     description = models.TextField(blank=True, help_text=_("Description or trading rationale for this instance."))
     params = models.JSONField(default=dict, blank=True, help_text="JSON object of strategy-specific parameters.")
@@ -387,12 +414,128 @@ class StrategyInstance(AfterSaveActionMixin, models.Model, GetContentsMixin, Tas
     history = HistoricalRecords()
 
     @property
+    def instrument(self) -> 'Instrument | None':
+        """Primary/default instrument for this strategy instance (key='instrument_id' or first)."""
+        si = self.strategy_instruments.filter(key='instrument_id').first() or self.strategy_instruments.first()
+        return si.instrument if si else None
+
+    @property
     def instrument_id(self) -> str:
-        return self.instrument.instrument_id_str if self.instrument else ""
+        inst = self.instrument
+        return inst.instrument_id_str if inst else ""
+
+    def get_instruments(self) -> list['Instrument']:
+        """Returns all distinct instruments configured for this instance."""
+        return list(self.instruments.all())
+
+    def get_instruments_dict(self) -> dict[str, 'Instrument']:
+        """Returns key -> Instrument mapping for multi-instrument configurations."""
+        return {si.key: si.instrument for si in self.strategy_instruments.select_related('instrument')}
+
+    def task_from_action(self, action_type, user=None, message=None):
+        """Creates a background Task corresponding to the specified action."""
+        if action_type in (self.ACTION_INSTANTIATE_STRATEGY, "instantiate_strategy"):
+            from task.models import Task
+            return Task.createTaskIfQueueEnabled(
+                subject=self,
+                task_type=settings.TASK_EXECUTE_FUNC,
+                payload={'func': 'instantiate_strategy'},
+                owner=user,
+            )
+        return super().task_from_action(action_type, user=user, message=message)
+
+    def instantiate_strategy(
+        self,
+        params_override: dict | None = None,
+        bar_type: str | None = None,
+    ):
+        """
+        Instantiates and returns the NautilusStrategy for this StrategyInstance.
+        Injects configured StrategyInstruments with their respective keys into the configuration.
+        Throws an exception if the strategy or configuration cannot be instantiated.
+        """
+        if not self.strategy_model or not self.strategy_model.class_path:
+            raise ValueError(f"StrategyInstance #{self.pk} has no Strategy or class_path configured.")
+
+        import inspect
+        from .utils import resolve_strategy_classes
+
+        strategy_class, config_class = resolve_strategy_classes(self.strategy_model.class_path)
+        target = config_class or strategy_class.__init__
+
+        sig = inspect.signature(target)
+        valid_params = set(sig.parameters.keys())
+        if inspect.isclass(target) and hasattr(target, "__dataclass_fields__"):
+            valid_params |= set(target.__dataclass_fields__.keys())
+
+        has_var_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+        type_hints = getattr(target, "__annotations__", {})
+
+        # Start with instance params merged with overrides
+        merged_params = dict(self.params or {})
+        if params_override:
+            merged_params.update(params_override)
+
+        # Inject StrategyInstruments with their keys ONLY if expected by target
+        key_instruments: dict[str, list[str]] = {}
+        for si in self.strategy_instruments.select_related('instrument'):
+            if si.instrument:
+                key_instruments.setdefault(si.key, []).append(si.instrument.instrument_id_str)
+
+        for key, instr_ids in key_instruments.items():
+            if key in valid_params or has_var_kwargs:
+                expected = str(type_hints.get(key, "")).lower()
+                if len(instr_ids) == 1 and not any(t in expected for t in ["list", "tuple", "sequence"]):
+                    merged_params.setdefault(key, instr_ids[0])
+                elif "tuple" in expected:
+                    merged_params.setdefault(key, tuple(instr_ids))
+                else:
+                    merged_params.setdefault(key, instr_ids)
+
+        # Fallback for primary instrument ONLY if target explicitly expects instrument_id
+        if "instrument_id" in valid_params and "instrument_id" not in merged_params and self.instrument:
+            merged_params["instrument_id"] = self.instrument.instrument_id_str
+
+        # Fallback for plural instrument_ids ONLY if target explicitly expects it
+        if "instrument_ids" in valid_params and "instrument_ids" not in merged_params:
+            instruments = self.get_instruments() or ([self.instrument] if self.instrument else [])
+            if instruments:
+                expected = str(type_hints.get("instrument_ids", "")).lower()
+                ids = [i.instrument_id_str for i in instruments]
+                merged_params["instrument_ids"] = tuple(ids) if "tuple" in expected else ids
+
+        # Supply bar_type ONLY if target explicitly expects it
+        if "bar_type" in valid_params:
+            target_bar = merged_params.get("bar_type") or bar_type
+            if target_bar is not None:
+                expected_type = str(type_hints.get("bar_type", ""))
+                if "BarType" in expected_type:
+                    from nautilus_trader.model.data import BarType
+                    merged_params["bar_type"] = target_bar if isinstance(target_bar, BarType) else BarType.from_str(str(target_bar))
+                else:
+                    merged_params["bar_type"] = str(target_bar)
+
+        # Filter kwargs to strictly what target accepts
+        filtered_kwargs = {}
+        for k, v in merged_params.items():
+            if k in ["actor_path", "config_path", "config"]:
+                continue
+            if k in valid_params or has_var_kwargs:
+                filtered_kwargs[k] = v
+
+        if config_class:
+            config = config_class(**filtered_kwargs)
+            strat_sig = inspect.signature(strategy_class.__init__)
+            if "config" in strat_sig.parameters:
+                return strategy_class(config=config)
+            return strategy_class(config)
+
+        return strategy_class(**filtered_kwargs)
 
     def __str__(self):
         strat_name = self.strategy_model.name if self.strategy_model else "Unassigned Strategy"
-        return f"{strat_name} on {self.instrument}"
+        instr = self.instrument
+        return f"{strat_name} on {instr}" if instr else f"{strat_name} (#{self.id})"
 
     def get_contents(self, generate_self=True, preset=None):
         parts = []
@@ -409,7 +552,11 @@ class StrategyInstance(AfterSaveActionMixin, models.Model, GetContentsMixin, Tas
                 group_lines = [f"- Group '{g.name}' ({g.code}): {g.symbols}" for g in groups]
                 parts.append("### Available Instrument Groups:\n" + "\n".join(group_lines))
 
-        if self.instrument:
+        instruments_list = list(self.strategy_instruments.select_related('instrument'))
+        if instruments_list:
+            instr_lines = [f"- {si.key}: {si.instrument.symbol} ({si.instrument.venue}, {si.instrument.asset_class}, {si.instrument.currency})" for si in instruments_list]
+            parts.append("### Target Instruments:\n" + "\n".join(instr_lines))
+        elif self.instrument:
             parts.append(f"### Target Instrument:\nSymbol: {self.instrument.symbol}, Venue: {self.instrument.venue}, Asset Class: {self.instrument.asset_class}, Currency: {self.instrument.currency}")
 
         if self.params:
@@ -430,6 +577,41 @@ class StrategyInstance(AfterSaveActionMixin, models.Model, GetContentsMixin, Tas
                 parts.extend(strat_parts if isinstance(strat_parts, list) else [str(strat_parts)])
 
         return parts
+
+
+class StrategyInstrument(models.Model):
+    """
+    Connects a StrategyInstance to an Instrument, allowing multi-instrument strategies.
+    Identified by a key string defaulting to 'instrument_id'.
+    """
+    strategy_instance = models.ForeignKey(
+        StrategyInstance,
+        on_delete=models.CASCADE,
+        related_name='strategy_instruments',
+        help_text=_("The strategy instance.")
+    )
+    instrument = models.ForeignKey(
+        'Instrument',
+        on_delete=models.CASCADE,
+        related_name='strategy_instruments',
+        help_text=_("The connected instrument.")
+    )
+    key = models.CharField(
+        max_length=64,
+        default="instrument_id",
+        help_text=_("Identifier or role key for the instrument within the strategy, e.g. 'instrument_id'.")
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = _('Strategy Instrument')
+        verbose_name_plural = _('Strategy Instruments')
+        unique_together = ('strategy_instance', 'instrument', 'key')
+        ordering = ['strategy_instance', 'key']
+
+    def __str__(self):
+        return f"{self.strategy_instance} - {self.key}: {self.instrument}"
 
 
 def normalize_bar_type_choice(val: str) -> str:
@@ -639,13 +821,15 @@ class Backtest(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolder)
 
     ACTION_RUN_BACKTEST = TASK_RUN_BACKTEST
     ACTION_RUN_OPTIMIZATION = TASK_RUN_OPTIMIZATION
-    ACTION_LOAD_DATA = TASK_LOAD_DATA
+    ACTION_LOAD_DATA = f"{settings.TASK_EXECUTE_FUNC}-func-load_data"
 
     ACTION_CHOICES = (
         (ACTION_LOAD_DATA, _("Load Historical Data")),
         (ACTION_RUN_BACKTEST, _("Run Backtest")),
         (ACTION_RUN_OPTIMIZATION, _("Run Parameter Optimization")),
     ) + getattr(settings, 'COMMON_TEXT_ACTION_CHOICES', ())
+
+    ACTIONS_NO_INPUT = (ACTION_LOAD_DATA, ACTION_RUN_BACKTEST)
 
     AGENT_PRESETS = (
         (TASK_LOAD_DATA, _("Load Data")),
@@ -712,16 +896,27 @@ class Backtest(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolder)
         end_dt = self.end_date or timezone.now()
         return start_dt, end_dt, (end_dt - start_dt)
 
+    def get_instruments(self) -> list["Instrument"]:
+        """Returns all instruments required for this backtest."""
+        if not self.strategy_instance:
+            return []
+        instruments = self.strategy_instance.get_instruments()
+        if not instruments and self.strategy_instance.instrument:
+            instruments = [self.strategy_instance.instrument]
+        return instruments
+
     def get_covering_historical_data(
         self,
         start: datetime.datetime | None = None,
         end: datetime.datetime | None = None,
+        instrument: "Instrument | None" = None,
     ):
         """
-        Finds a HistoricalData record for the instrument whose time range covers
-        the required period and has a duration larger than or equal to the required time delta.
+        Finds a HistoricalData record for the target instrument (or primary instrument)
+        whose time range covers the required period.
         """
-        if not self.strategy_instance or not self.strategy_instance.instrument:
+        target = instrument or (self.strategy_instance.instrument if self.strategy_instance else None)
+        if not target:
             return None
 
         default_start, default_end, _ = self.get_required_range()
@@ -729,11 +924,11 @@ class Backtest(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolder)
         end_dt = end or default_end
         required_delta = end_dt - start_dt
 
-        raw_bar_type = (self.strategy_instance.params or {}).get("bar_type")
+        raw_bar_type = (self.strategy_instance.params or {}).get("bar_type") if self.strategy_instance else None
         bar_type_choice = normalize_bar_type_choice(raw_bar_type)
 
         candidates = HistoricalData.objects.filter(
-            instrument=self.strategy_instance.instrument,
+            instrument=target,
             bar_type=bar_type_choice,
             start_date__lte=start_dt,
             end_date__gte=end_dt,
@@ -744,22 +939,42 @@ class Backtest(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolder)
                 return record
         return None
 
+    def get_all_covering_historical_data(
+        self,
+        start: datetime.datetime | None = None,
+        end: datetime.datetime | None = None,
+    ) -> list["HistoricalData"]:
+        """Finds covering historical datasets for all instruments in this backtest."""
+        datasets = []
+        for instr in self.get_instruments():
+            data = self.get_covering_historical_data(start=start, end=end, instrument=instr)
+            if data:
+                datasets.append(data)
+        return datasets
+
     def is_covered(
         self,
         start: datetime.datetime | None = None,
         end: datetime.datetime | None = None,
     ) -> bool:
         """
-        Checks if a HistoricalData dataset connected to the instrument is present,
-        has bars, and covers a time span larger than or equal to the required time delta.
+        Checks if all instruments required for this backtest are covered by HistoricalData datasets.
         """
-        return self.get_covering_historical_data(start=start, end=end) is not None
+        instruments = self.get_instruments()
+        if not instruments:
+            return False
+        return all(self.get_covering_historical_data(start=start, end=end, instrument=instr) is not None for instr in instruments)
 
-    def load_data(self, force: bool = False, catalog_path: str | None = None) -> HistoricalData:
+    def load_data(
+        self,
+        force: bool = False,
+        catalog_path: str | None = None,
+        as_task: bool = False,
+        owner=None,
+    ):
         """
-        Checks and loads historical data required for this backtest.
-        Reuses matching persisted HistoricalData if available and covered,
-        otherwise downloads/creates bars via HistoricalData.load_data.
+        Checks and loads historical data for all instruments required for this backtest.
+        If as_task=True, delegates execution to a background task.
         """
         start_dt, end_dt, _ = self.get_required_range()
 
@@ -770,25 +985,28 @@ class Backtest(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolder)
         if self.pk and not self._state.adding:
             self.save(update_fields=['start_date', 'end_date'])
 
-        # 1. Reuse existing persisted dataset if covered
-        if not force:
-            covering = self.get_covering_historical_data(start=start_dt, end=end_dt)
-            if covering:
-                return covering
-
-        # 2. Otherwise create/get dataset and trigger load_data
-        instrument_model = self.strategy_instance.instrument
-        raw_bar_type = (self.strategy_instance.params or {}).get("bar_type")
+        instruments = self.get_instruments()
+        raw_bar_type = (self.strategy_instance.params or {}).get("bar_type") if self.strategy_instance else None
         bar_type_choice = normalize_bar_type_choice(raw_bar_type)
+        loaded = []
 
-        record, _ = HistoricalData.objects.get_or_create(
-            instrument=instrument_model,
-            bar_type=bar_type_choice,
-            start_date=start_dt,
-            end_date=end_dt,
-        )
-        record.load_data(force=force)
-        return record
+        for instr in instruments:
+            if not force:
+                covering = self.get_covering_historical_data(start=start_dt, end=end_dt, instrument=instr)
+                if covering:
+                    loaded.append(covering)
+                    continue
+
+            record, _ = HistoricalData.objects.get_or_create(
+                instrument=instr,
+                bar_type=bar_type_choice,
+                start_date=start_dt,
+                end_date=end_dt,
+            )
+            record.load_data(force=force)
+            loaded.append(record)
+
+        return loaded[0] if len(loaded) == 1 else loaded
 
     def apply_best_params_to_instance(self):
         """Promotes the winning parameters back to the parent StrategyInstance."""
@@ -798,21 +1016,22 @@ class Backtest(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolder)
 
     def get_contents(self, generate_self=True, preset=None):
         strat = self.strategy_instance.strategy_model if self.strategy_instance else "None"
-        instr = self.strategy_instance.instrument if self.strategy_instance else "None"
+        instruments = self.get_instruments()
+        instr_str = ", ".join(str(i) for i in instruments) if instruments else "None"
         parts = [
             f"### Backtest: {self}",
             f"- Strategy: {strat}",
-            f"- Instrument: {instr}",
+            f"- Instruments: {instr_str}",
             f"- Period: {self.start_date} to {self.end_date}",
             f"- Initial Capital: ${self.initial_capital:,.2f}",
         ]
-        covering_data = self.get_covering_historical_data()
-        if covering_data:
+        all_covering = self.get_all_covering_historical_data()
+        if instruments and len(all_covering) == len(instruments):
             parts.append(
-                f"- Historical Data: {covering_data.bar_count:,} bars ({covering_data.get_source_display()})"
+                f"- Historical Data: Covered for all {len(instruments)} instrument(s)"
             )
         else:
-            parts.append("- Historical Data: Not covered (run load_data)")
+            parts.append(f"- Historical Data: Partially or not covered ({len(all_covering)}/{len(instruments)} covered, run load_data)")
         if self.total_pnl is not None:
             parts.append(
                 f"### Performance Metrics:\n"
@@ -825,6 +1044,91 @@ class Backtest(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolder)
             import json
             parts.append(f"### Best Optimized Parameters:\n```json\n{json.dumps(self.best_params, indent=2)}\n```")
         return parts
+
+
+class BacktestRun(GetContentsMixin, models.Model):
+    """
+    Historical execution record of a single backtest run.
+    Stores the exact strategy configuration used, a frozen snapshot of the strategy code,
+    the complete runtime log, and the interactive HTML tearsheet generated by Nautilus.
+    """
+    backtest = models.ForeignKey(
+        'Backtest',
+        on_delete=models.CASCADE,
+        related_name='runs',
+        null=True,
+        blank=True,
+        help_text=_("Parent backtest session if initiated from a Backtest entity.")
+    )
+    strategy_instance = models.ForeignKey(
+        'StrategyInstance',
+        on_delete=models.CASCADE,
+        related_name='backtest_runs',
+        null=True,
+        blank=True,
+        help_text=_("Strategy instance executed.")
+    )
+    config = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=_("Final configuration parameters used for the backtest execution.")
+    )
+    code = models.TextField(
+        blank=True,
+        help_text=_("Frozen snapshot of strategy source code at execution time.")
+    )
+    log = models.TextField(
+        blank=True,
+        help_text=_("Execution and simulation logs.")
+    )
+    html_report = models.TextField(
+        blank=True,
+        help_text=_("Interactive HTML tearsheet report generated by Nautilus Trader.")
+    )
+
+    # Core performance metrics
+    total_pnl = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    return_pct = models.FloatField(null=True, blank=True)
+    sharpe_ratio = models.FloatField(null=True, blank=True)
+    sortino_ratio = models.FloatField(null=True, blank=True)
+    calmar_ratio = models.FloatField(null=True, blank=True)
+    max_drawdown_pct = models.FloatField(null=True, blank=True)
+    profit_factor = models.FloatField(null=True, blank=True)
+    win_rate = models.FloatField(null=True, blank=True)
+    total_trades = models.IntegerField(null=True, blank=True)
+
+    start_date = models.DateTimeField(null=True, blank=True)
+    end_date = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = _('Backtest Run')
+        verbose_name_plural = _('Backtest Runs')
+
+    def __str__(self):
+        strat = self.strategy_instance or (self.backtest.strategy_instance if self.backtest else "Run")
+        return f"Run #{self.id} for {strat} ({self.created_at:%Y-%m-%d %H:%M})"
+
+    def get_contents(self, generate_self=True, preset=None):
+        parts = [
+            f"### Backtest Run #{self.id}",
+            f"- Strategy Instance: {self.strategy_instance}",
+            f"- Backtest: {self.backtest}",
+            f"- Period: {self.start_date} to {self.end_date}",
+        ]
+        if self.total_pnl is not None:
+            parts.append(
+                f"### Performance Metrics:\n"
+                f"- PnL: ${self.total_pnl:,.2f} ({self.return_pct:.2%})\n"
+                f"- Sharpe Ratio: {self.sharpe_ratio:.2f} | Sortino: {self.sortino_ratio:.2f} | Calmar: {self.calmar_ratio:.2f}\n"
+                f"- Max Drawdown: {self.max_drawdown_pct:.2%} | Win Rate: {self.win_rate:.1%}\n"
+                f"- Total Trades: {self.total_trades}"
+            )
+        return parts
+
+
+BackTestRun = BacktestRun
 
 
 
@@ -916,11 +1220,15 @@ class Recommendation(models.Model):
         )
         instance, created = StrategyInstance.objects.update_or_create(
             strategy_model=self.recommended_strategy,
-            instrument=instrument,
             defaults={
                 'params': self.recommended_params,
                 'is_active': True,
             }
+        )
+        StrategyInstrument.objects.update_or_create(
+            strategy_instance=instance,
+            instrument=instrument,
+            defaults={'key': 'instrument_id'}
         )
         self.status = self.RecommendationStatus.ACCEPTED
         self.save()
@@ -950,19 +1258,31 @@ class InstrumentGroup(AfterSaveActionMixin, models.Model, GetContentsMixin, Task
     """
     A collection of instruments grouped for trading universes, scans, or execution.
     """
-    ACTION_SEARCH_AND_CREATE = "search_and_create_instruments"
+    TASK_TEXT_GENERATE = getattr(settings, 'TASK_TYPE_GENERATE_TEXT', 'generate_text')
 
+    PRESET_PROMPT_TO_INSTR = "prompt_to_instr"
+
+    ACTION_PROMPT_TO_INSTR = f"{TASK_TEXT_GENERATE}-preset-{PRESET_PROMPT_TO_INSTR}-schema-{getattr(settings, 'SCHEMA_INSTRUMENTS', 'instruments')}"
+    ACTION_SEARCH_CREATE_INSTRUMENTS =  f"{settings.TASK_EXECUTE_FUNC}-func-create_instruments"
+    
     ACTION_CHOICES = (
-        (ACTION_SEARCH_AND_CREATE, _("Search IB & Create Instruments")),
-    )
+        (ACTION_PROMPT_TO_INSTR, _("Prompt to Instruments")),
+        (ACTION_SEARCH_CREATE_INSTRUMENTS, _("Search & Create Instruments")),
+    ) + getattr(settings, 'COMMON_TEXT_ACTION_CHOICES', ())
+
+    ACTIONS_NO_INPUT = (ACTION_PROMPT_TO_INSTR, ACTION_SEARCH_CREATE_INSTRUMENTS)
+
+    AGENT_PRESETS = (
+        (PRESET_PROMPT_TO_INSTR, _("Prompt to Instruments")),
+    ) + getattr(settings, 'COMMON_TEXT_AGENT_PRESETS', ())
 
     name = models.CharField(max_length=100, unique=True)
     code = models.CharField(max_length=50, unique=True, help_text=_("Short identifier for the group (e.g., 'US_TECH', 'FX_MAJORS')."))
-    description = models.TextField(blank=True)
-    symbols = models.JSONField(
+    prompt = models.TextField(_("prompt"), blank=True, null=True)
+    instruments = models.JSONField(
         default=list,
         blank=True,
-        help_text=_("JSON vector/list of symbols or queries to search and create instruments for.")
+        help_text=_("Gateway JSON specifications for instruments (symbol, venue, asset_class, currency).")
     )
     is_active = models.BooleanField(default=True)
 
@@ -977,115 +1297,76 @@ class InstrumentGroup(AfterSaveActionMixin, models.Model, GetContentsMixin, Task
         verbose_name_plural = _('Instrument Groups')
         ordering = ['name']
 
+
     def __str__(self):
         return f"{self.name} ({self.code})"
 
     def get_contents(self, generate_self=True, preset=None):
         parts = []
-        if self.description:
-            parts.append(f"Description: {self.description}")
-        if self.name:
-            parts.append(f"Group Name: {self.name}")
-        if self.symbols:
-            parts.append(f"Symbols: {self.symbols}")
+        parts.append(self.prompt)
         return parts
 
-    def get_symbols_as_json(self) -> str:
-        import json
-        if isinstance(self.symbols, (list, dict)):
-            return json.dumps(self.symbols, indent=2)
-        return json.dumps(self.get_codes(), indent=2)
+    def create_instruments(self) -> dict:
+        """Queries Interactive Brokers for each item in self.instruments and creates/links Instrument and IBContract records."""
+        from argo.instruments.search import InteractiveBrokersSearchService, ASSET_CLASS_TO_SEC_TYPE
+        from argo.models import AssetClass
+        from agent.schemas import get_asset_sync_info
 
-    def get_codes(self) -> list[str]:
-        """Extracts clean symbol/query strings from the symbols JSON vector."""
-        if not self.symbols:
-            return []
-        codes = []
-        if isinstance(self.symbols, list):
-            for item in self.symbols:
-                if isinstance(item, str):
-                    for line in item.splitlines():
-                        clean = line.strip().upper()
-                        if clean:
-                            codes.append(clean)
-                elif isinstance(item, dict):
-                    sym = item.get("symbol") or item.get("code") or item.get("query")
-                    if sym:
-                        codes.append(str(sym).strip().upper())
-                elif item is not None:
-                    codes.append(str(item).strip().upper())
-        elif isinstance(self.symbols, str):
-            for line in re.split(r'[\r\n,;]+', self.symbols):
-                clean = line.strip().upper()
-                if clean:
-                    codes.append(clean)
-        # Deduplicate while preserving original order
-        return list(dict.fromkeys(codes))
-
-    def create_instrument_from_match(self, match) -> tuple["Instrument | None", bool]:
-        """Creates or updates Instrument and IBContract records from a match and links it to this group."""
-        return create_instrument_from_match(match, group=self)
-
-    def search_and_create_instruments_task(self, owner=None, process=True):
-        """Wraps search_and_create_instruments in a background Task via TaskExecuteFunc."""
-        from task.models import Task
-        task_type = getattr(settings, "TASK_EXECUTE_FUNC", "execute_func")
-        return Task.createTaskIfQueueEnabled(
-            subject=self,
-            task_type=task_type,
-            owner=owner,
-            payload={"func": "search_and_create_instruments"},
-            process=process,
-        )
-
-    def task_from_action(self, action_type, user=None):
-        """Creates a background Task corresponding to the specified action."""
-        if action_type == self.ACTION_SEARCH_AND_CREATE:
-            return self.search_and_create_instruments_task(owner=user)
-        from task.models import Task
-        return Task.createTaskIfQueueEnabled(
-            subject=self,
-            task_type=action_type,
-            owner=user,
-        )
-
-    def search_and_create_instruments(self, as_task: bool = False, owner=None) -> tuple[int, int]:
-        """Performs Interactive Brokers symbol search for each item/line and creates Instrument and IBContract records.
-        If as_task=True, delegates execution to a background Task.
-        """
-        if as_task:
-            return self.search_and_create_instruments_task(owner=owner)
-
-        from argo.instruments.search import InteractiveBrokersSearchService
-        codes = self.get_codes()
-        if not codes:
-            return 0, 0
-
-        search_service = InteractiveBrokersSearchService()
-        created_count = 0
-
-        for code in codes:
+        raw_items = getattr(self, 'instruments', None) or getattr(self, 'instrument', None) or []
+        if isinstance(raw_items, str):
             try:
-                matches = search_service.search(query=code)
+                import json
+                raw_items = json.loads(raw_items)
+            except Exception:
+                raw_items = []
+        items = raw_items if isinstance(raw_items, list) else []
+        if not items:
+            return {'created': [], 'existing': [], 'skipped': [], 'total_created': 0, 'total_skipped': 0}
+
+        created_reports, existing_reports, skipped_reports = [], [], []
+        search_service = InteractiveBrokersSearchService()
+
+        for item in items:
+            code = (item.get("symbol") or "").strip().upper()
+            if not code:
+                continue
+
+            raw_asset_class = (item.get("asset_class") or getattr(self, "asset_class", None) or AssetClass.EQUITY).strip().upper()
+            asset_class = getattr(AssetClass, raw_asset_class, AssetClass.EQUITY) if hasattr(AssetClass, raw_asset_class) else AssetClass.EQUITY
+            venue = (item.get("venue") or getattr(self, "venue", None) or "").strip().upper()
+            currency = (item.get("currency") or getattr(self, "currency", None) or "USD").strip().upper()
+            sec_type = item.get("sec_type") or ASSET_CLASS_TO_SEC_TYPE.get(asset_class, "STK")
+
+            matches = []
+            try:
+                matches = search_service.search(query=code, sec_type=sec_type, currency=currency)
             except Exception:
                 matches = []
+            match = next((m for m in matches if getattr(m, "symbol", "").upper() == code), None)
 
-            for match in matches:
-                _, created = self.create_instrument_from_match(match)
-                if created:
-                    created_count += 1
+            if not match:
+                skipped_reports.append({'symbol': code, 'status': 'skipped', 'reason': 'Not found on Interactive Brokers'})
+                continue
 
-        return created_count, len(codes)
+            instrument, created = create_instrument_from_match(
+                match=match,
+                group=self,
+                venue=venue or None,
+                asset_class=asset_class,
+                currency=currency,
+            )
 
-    def create_instruments(self) -> tuple[int, int]:
-        """Creates Instrument and default IBContract objects for each code in this group."""
-        return self.search_and_create_instruments()
+            if instrument:
+                report = get_asset_sync_info(instrument, created)
+                (created_reports if created else existing_reports).append(report)
 
-    def populate_symbols_from_ib(self, query: str, append: bool = False) -> list[str]:
-        """Discovers symbols matching query via IB and updates group symbols."""
-        from argo.instruments.search import InteractiveBrokersSearchService
-        return InteractiveBrokersSearchService().populate_group(self, query=query, append=append)
-
+        return {
+            'created': created_reports,
+            'existing': existing_reports,
+            'skipped': skipped_reports,
+            'total_created': len(created_reports),
+            'total_skipped': len(skipped_reports),
+        }
 
 
 
@@ -1093,7 +1374,7 @@ class Instrument(models.Model):
     """
     Generalized financial instrument metadata for backtesting and execution.
     """
-    groups = models.ManyToManyField(InstrumentGroup, related_name='instruments', blank=True)
+    groups = models.ManyToManyField(InstrumentGroup, related_name='linked_instruments', blank=True)
     symbol = models.CharField(max_length=64, db_index=True)
     venue = models.CharField(max_length=32, db_index=True)
     asset_class = models.CharField(max_length=16, choices=AssetClass.choices, default=AssetClass.EQUITY)
@@ -1148,10 +1429,45 @@ class IBContract(models.Model):
         return f"IB:{self.sec_type} {self.instrument.symbol} @ {self.exchange} (ID: {self.con_id or 'N/A'})"
 
 
-def create_instrument_from_match(match, group: "InstrumentGroup | None" = None) -> tuple["Instrument | None", bool]:
+def _update_ib_contract(contract: "IBContract", match, venue: str | None = None) -> bool:
+    """Updates contract fields if newer metadata is present."""
+    changed = False
+    sec_type = getattr(match, "sec_type", "") or ""
+    if sec_type and contract.sec_type != sec_type:
+        contract.sec_type = sec_type
+        changed = True
+    exchange = getattr(match, "exchange", "") or venue or ""
+    if exchange and contract.exchange != exchange:
+        contract.exchange = exchange
+        changed = True
+    primary_ex = getattr(match, "primary_exchange", "") or ""
+    if primary_ex and contract.primary_exchange != primary_ex:
+        contract.primary_exchange = primary_ex
+        changed = True
+    local_sym = getattr(match, "local_symbol", "") or ""
+    if local_sym and contract.local_symbol != local_sym:
+        contract.local_symbol = local_sym
+        changed = True
+    trading_cls = getattr(match, "trading_class", "") or ""
+    if trading_cls and contract.trading_class != trading_cls:
+        contract.trading_class = trading_cls
+        changed = True
+    if changed:
+        contract.save()
+    return changed
+
+
+def create_instrument_from_match(
+    match,
+    group: "InstrumentGroup | None" = None,
+    venue: str | None = None,
+    asset_class: str | None = None,
+    currency: str | None = None,
+) -> tuple["Instrument | None", bool]:
     """
     Factory function that creates or updates an Instrument and IBContract from a search match.
     Optionally links the instrument to an InstrumentGroup.
+    Deduplicates by con_id to prevent database integrity errors with existing contracts.
     """
     if not match:
         return None, False
@@ -1160,22 +1476,34 @@ def create_instrument_from_match(match, group: "InstrumentGroup | None" = None) 
     if not symbol:
         return None, False
 
-    venue = getattr(match, "primary_exchange", "") or getattr(match, "exchange", "") or "SMART"
-    asset_class = getattr(match, "asset_class", "") or AssetClass.EQUITY
-    currency = getattr(match, "currency", "") or "USD"
     con_id = getattr(match, "con_id", None)
     if con_id is not None and con_id <= 0:
         con_id = None
+
+    if con_id:
+        existing_contract = IBContract.objects.filter(con_id=con_id).select_related('instrument').first()
+        if existing_contract:
+            instrument = existing_contract.instrument
+            if group is not None:
+                instrument.groups.add(group)
+            _update_ib_contract(existing_contract, match, venue)
+            return instrument, False
+
+    resolved_venue = venue or getattr(match, "primary_exchange", "") or getattr(match, "exchange", "") or "SMART"
+    resolved_asset_class = (getattr(match, "asset_class", "") or None) or asset_class or AssetClass.EQUITY
+    resolved_currency = (getattr(match, "currency", "") or None) or currency or "USD"
     sec_type = getattr(match, "sec_type", "") or "STK"
     local_symbol = getattr(match, "local_symbol", "") or ""
     trading_class = getattr(match, "trading_class", "") or ""
+    primary_exchange = getattr(match, "primary_exchange", "") or (resolved_venue if resolved_venue != "SMART" else "") or ""
+    exchange = getattr(match, "exchange", "") or resolved_venue or "SMART"
 
     instrument, created = Instrument.objects.get_or_create(
         symbol=symbol,
-        venue=venue,
-        asset_class=asset_class,
+        venue=resolved_venue,
+        asset_class=resolved_asset_class,
         defaults={
-            'currency': currency,
+            'currency': resolved_currency,
             'is_active': True,
         },
     )
@@ -1187,8 +1515,8 @@ def create_instrument_from_match(match, group: "InstrumentGroup | None" = None) 
         defaults={
             'con_id': con_id,
             'sec_type': sec_type,
-            'exchange': venue,
-            'primary_exchange': venue if venue != "SMART" else "",
+            'exchange': exchange,
+            'primary_exchange': primary_exchange,
             'local_symbol': local_symbol,
             'trading_class': trading_class,
         },

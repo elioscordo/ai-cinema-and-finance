@@ -314,10 +314,20 @@ class GetContentsMixin:
 
     def task_from_action(self, action_type, user, message=None):
         """
-        Parses an action_type string to extract the task_type and an optional preset.
-        The expected format is 'task_type_preset_preset_name' or just 'task_type'. It
-        can also include a target field like: 'task_type_preset_preset_name_target_field_name'
+        Parses an action_type string to extract the task_type and an optional preset or func.
+        The expected format is 'task_type_preset_preset_name', 'task_type-func-method_name', or just 'task_type'.
         """
+        if '-func-' in action_type:
+            parts = action_type.split('-func-', 1)
+            task_type = parts[0]
+            func_name = parts[1]
+            return Task.createTaskIfQueueEnabled(
+                subject=self,
+                task_type=task_type,
+                payload={'func': func_name},
+                owner=user
+            )
+
         parts = action_type.split('-preset-', 1)
         task_type = parts[0]
         preset_part = parts[1] if len(parts) > 1 else None
@@ -726,6 +736,8 @@ class Agent(models.Model):
             if schema is not None:
                 data = schema_class.model_validate_json(response.text)
                 out = data.sync_model(prompt_obj) if hasattr(data, "sync_model") else data
+                if hasattr(data, "sync_text"):
+                    data.sync_text(prompt_obj, response.text)              
             else:
                 out = self.extract_text(response, prompt_obj)
         return out

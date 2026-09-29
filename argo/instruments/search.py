@@ -121,8 +121,9 @@ class InteractiveBrokersSearchService:
             return []
 
         existing = set(group.get_codes()) if append else set()
-        group.symbols = sorted(existing.union(symbols))
-        group.save(update_fields=["symbols", "updated_at"])
+        new_codes = sorted(existing.union(symbols))
+        group.instruments = [{"symbol": s, "venue": "SMART", "asset_class": "EQUITY", "currency": "USD"} for s in new_codes]
+        group.save(update_fields=["instruments", "updated_at"])
         return symbols
 
     def _extract_results(

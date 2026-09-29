@@ -4,7 +4,65 @@ import pkgutil
 from django.apps import apps
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.data import BarType
+from nautilus_trader.trading.config import StrategyConfig
 from nautilus_trader.trading.strategy import Strategy as NautilusStrategy
+
+
+def resolve_strategy_classes(class_path: str):
+    """
+    Imports and returns (strategy_class, config_class) for a given strategy class path.
+    Discovers the configuration class dynamically without assuming a fixed naming pattern.
+    """
+    module_path, class_name = class_path.rsplit(".", 1)
+    module = importlib.import_module(module_path)
+    strategy_class = getattr(module, class_name)
+
+    config_class = None
+
+    # 1. Inspect __init__ signature of strategy_class for a 'config' parameter annotation
+    try:
+        sig = inspect.signature(strategy_class.__init__)
+        if "config" in sig.parameters:
+            ann = sig.parameters["config"].annotation
+            if inspect.isclass(ann) and issubclass(ann, StrategyConfig):
+                config_class = ann
+            elif isinstance(ann, str) and hasattr(module, ann):
+                candidate = getattr(module, ann)
+                if inspect.isclass(candidate) and issubclass(candidate, StrategyConfig):
+                    config_class = candidate
+    except Exception:
+        pass
+
+    # 2. Check strategy_class attributes
+    if not config_class:
+        for attr in ("config_type", "Config", "config_class"):
+            candidate = getattr(strategy_class, attr, None)
+            if inspect.isclass(candidate) and issubclass(candidate, StrategyConfig):
+                config_class = candidate
+                break
+
+    # 3. Check conventional naming variants in the module
+    if not config_class:
+        candidates = [
+            f"{class_name}Config",
+            f"{class_name[:-8]}Config" if class_name.endswith("Strategy") else f"{class_name}Config",
+        ]
+        for c in candidates:
+            candidate = getattr(module, c, None)
+            if inspect.isclass(candidate) and issubclass(candidate, StrategyConfig):
+                config_class = candidate
+                break
+
+    # 4. Search module for any StrategyConfig subclass
+    if not config_class:
+        for attr_name in dir(module):
+            val = getattr(module, attr_name)
+            if inspect.isclass(val) and issubclass(val, StrategyConfig) and val is not StrategyConfig:
+                config_class = val
+                break
+
+    return strategy_class, config_class
+
 
 DEFAULT_STRATEGIES = [
     {
@@ -56,6 +114,11 @@ DEFAULT_STRATEGIES = [
         "name": "Buy and Hold Benchmark",
         "class_path": "argo.strategies.buy_and_hold.BuyAndHoldStrategy",
         "description": "Baseline passive benchmark holding an asset from start to evaluate strategy alpha."
+    },
+    {
+        "name": "ORB Trend Following Strategy",
+        "class_path": "argo.strategies.orb_trend_following.ORBTrendFollowingStrategy",
+        "description": "US Market Opening Range Breakout (ORB) trend-following strategy with S&P 500 and ETF confirmation buying top underlying winners."
     },
 ]
 
@@ -124,22 +187,7 @@ def load_strategies_from_db(node: TradingNode):
 
     for instance in instances:
         try:
-            module_path, class_name = instance.strategy_model.class_path.rsplit(".", 1)
-            module = importlib.import_module(module_path)
-            strategy_class = getattr(module, class_name)
-            bar_type = BarType.from_str(instance.params.get("bar_type", "1-MINUTE-BAR-ASK-BID-LAST"))
-
-            config_class = getattr(module, f"{class_name}Config", None)
-            if config_class:
-                config = config_class(
-                    instrument_id=instance.instrument_id,
-                    bar_type=str(bar_type),
-                    **{k: v for k, v in instance.params.items() if k not in ["bar_type", "instrument_id"]}
-                )
-                strategy = strategy_class(config=config)
-            else:
-                strategy = strategy_class(instrument_id=instance.instrument_id, bar_type=bar_type, **instance.params)
-
+            strategy = instance.instantiate_strategy()
             node.add_strategy(strategy)
         except Exception as e:
             print(f"[ERROR] Failed to load strategy instance {instance.id}: {e}")

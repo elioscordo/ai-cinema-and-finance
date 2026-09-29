@@ -19,3 +19,33 @@ class DynamicMarkdownWidget(MarkdownWidget):
             css=media._css,
             js=js_list
         )
+
+
+class CodeWidget(forms.Textarea):
+    """
+    Code editor widget with syntax highlighting, line numbers, and indentation.
+    Configurable language mode (defaults to python) and compatible with AJAX admin contexts.
+    """
+    is_code = True
+
+    def __init__(self, *args, language="python", **kwargs):
+        self.language = language
+        attrs = kwargs.setdefault("attrs", {})
+        attrs["data-code-editor"] = "true"
+        attrs["data-language"] = language
+        existing_class = attrs.get("class", "")
+        attrs["class"] = f"{existing_class} code-editor-textarea".strip()
+        super().__init__(*args, **kwargs)
+
+    @property
+    def media(self):
+        return forms.Media(
+            css={
+                "all": [
+                    "css/code_editor.css",
+                ]
+            },
+            js=[
+                "js/code_editor.js",
+            ]
+        )

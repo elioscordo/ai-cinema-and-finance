@@ -11,6 +11,8 @@ from .filters import (
     EfficiencyRatioNoiseFilter,
 )
 from .forecaster import PositionRiskForecaster, PositionRiskMetrics
+from .orb_indicator import OpeningRangeBreakoutIndicator, ORBState
+from .orb_trend_following import ORBTrendFollowingStrategy, ORBTrendFollowingConfig
 
 __all__ = [
     "ArgoBaseStrategy",
@@ -22,6 +24,10 @@ __all__ = [
     "TripleMATrendConfig",
     "DualMomentumStrategy",
     "DualMomentumStrategyConfig",
+    "OpeningRangeBreakoutIndicator",
+    "ORBState",
+    "ORBTrendFollowingStrategy",
+    "ORBTrendFollowingConfig",
     "FilterPipeline",
     "ADXTrendStrengthFilter",
     "ATRVolatilityRegimeFilter",

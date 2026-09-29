@@ -37,11 +37,7 @@ class ModelActionsAdminMixin:
             model_label = modeladmin.model._meta.verbose_name_plural
             modeladmin.message_user(
                 request,
-                _("Action '%(action)s' triggered for %(count)d selected %(name)s.") % {
-                    "action": description,
-                    "count": queryset.count(),
-                    "name": model_label,
-                }
+                f"Action '{description}' triggered for {queryset.count()} selected {model_label}."
             )
 
         action_func.__name__ = action_name
@@ -59,7 +55,7 @@ class ModelActionsAdminMixin:
         from django.utils.translation import gettext_lazy as _
 
         action_choices = dict(getattr(model, "ACTION_CHOICES", ()))
-        no_input_actions = getattr(model, "ACTIONS_NO_INPUT", getattr(model, "ACTION_NO_INPUT", None))
+        no_input_actions = getattr(model, "ACTIONS_NO_INPUT",  None)
         target_codes = no_input_actions if no_input_actions is not None else list(action_choices.keys())
 
         for action_code in target_codes:

@@ -3,23 +3,35 @@ from typing import List, Optional
 from agent.schemas import SyncReport, get_asset_sync_info
 
 
-class SymbolItemSchema(BaseModel):
-    symbol: str
-    name: Optional[str] = None
-    description: Optional[str] = None
-    asset_class: Optional[str] = None
-    venue: Optional[str] = None
-    currency: Optional[str] = None
-    sec_type: Optional[str] = None
+class InstrumentSchema(BaseModel):
+    symbol: str = Field(description="Symbol or ticker, e.g. AAPL, EUR.USD, ES")
+    name: Optional[str] = Field(default=None, description="Company or asset name")
+    description: Optional[str] = Field(default=None, description="Description")
+    asset_class: Optional[str] = Field(default="EQUITY", description="Asset class, e.g. EQUITY, FUTURE, OPTION, FX, COMMODITY, CRYPTO, INDEX")
+    venue: Optional[str] = Field(default="SMART", description="Trading venue or exchange, e.g. SMART, NASDAQ, NYSE, CME")
+    currency: Optional[str] = Field(default="USD", description="Currency code, e.g. USD, EUR, GBP")
+    sec_type: Optional[str] = Field(default=None, description="Security type, e.g. STK, CASH, CRYPTO, FUT")
 
 
-class SymbolsSchema(BaseModel):
-    symbols: List[SymbolItemSchema]
+# Aliases for backwards compatibility
+InstrumentItemSchema = InstrumentSchema
+SymbolItemSchema = InstrumentSchema
+
+
+class InstrumentsSchema(BaseModel):
+    instruments: List[InstrumentSchema] = Field(default_factory=list, description="List of instruments")
+    symbols: Optional[List[InstrumentSchema]] = Field(default=None, description="Optional alias for instruments")
+
+    def model_post_init(self, __context) -> None:
+        if not self.instruments and self.symbols:
+            self.instruments = self.symbols
+        elif not self.symbols and self.instruments:
+            self.symbols = self.instruments
 
     @classmethod
-    def from_group(cls, group) -> "SymbolsSchema":
-        return cls(symbols=[
-            SymbolItemSchema(
+    def from_group(cls, group) -> "InstrumentsSchema":
+        return cls(instruments=[
+            InstrumentSchema(
                 symbol=code,
                 asset_class=getattr(group, "asset_class", None),
                 venue=getattr(group, "venue", "SMART"),
@@ -28,86 +40,25 @@ class SymbolsSchema(BaseModel):
             for code in group.get_codes()
         ])
 
+    def sync_db(self, instance) -> dict:
+        return self.sync_model(instance)
+
     def sync_model(self, instance) -> dict:
-        from argo.models import Instrument, IBContract, InstrumentGroup, AssetClass
-        from argo.instruments.search import InteractiveBrokersSearchService, ASSET_CLASS_TO_SEC_TYPE
+        items = self.instruments or self.symbols or []
+        instance.instruments = [item.model_dump(exclude_none=True) for item in items]
+        instance.save()
 
-        group = instance if isinstance(instance, InstrumentGroup) else None
-        search_service = InteractiveBrokersSearchService()
-
-        created_reports = []
-        existing_reports = []
-        skipped_reports = []
-
-        for item in self.symbols:
-            code = item.symbol.strip().upper()
-            if not code:
-                continue
-
-            asset_class = item.asset_class or getattr(group, "asset_class", None) or AssetClass.EQUITY
-            venue = item.venue or getattr(group, "venue", None) or 'SMART'
-            currency = item.currency or getattr(group, "currency", None) or 'USD'
-            sec_type = item.sec_type or ASSET_CLASS_TO_SEC_TYPE.get(asset_class, 'STK')
-
-            matches = search_service.search(query=code, sec_type=sec_type, currency=currency)
-            match = next((m for m in matches if m.symbol == code), None)
-            if not match:
-                skipped_reports.append({
-                    'symbol': code,
-                    'status': 'skipped',
-                    'reason': 'Not found on Interactive Brokers'
-                })
-                continue
-
-            contract_venue = item.venue or getattr(group, "venue", None) or (match.primary_exchange or match.exchange or 'SMART')
-            contract_asset_class = match.asset_class or asset_class
-            contract_currency = match.currency or currency
-
-            instrument, created = Instrument.objects.get_or_create(
-                symbol=match.symbol,
-                venue=contract_venue,
-                asset_class=contract_asset_class,
-                defaults={
-                    'currency': contract_currency,
-                    'is_active': True,
-                }
-            )
-
-            IBContract.objects.update_or_create(
-                instrument=instrument,
-                defaults={
-                    'con_id': match.con_id if match.con_id > 0 else None,
-                    'sec_type': match.sec_type,
-                    'exchange': match.exchange or contract_venue,
-                    'primary_exchange': match.primary_exchange,
-                    'local_symbol': match.local_symbol,
-                    'trading_class': match.trading_class,
-                }
-            )
-
-            if group:
-                instrument.groups.add(group)
-
-            report = get_asset_sync_info(instrument, created)
-            if created:
-                created_reports.append(report)
-            else:
-                existing_reports.append(report)
-
-        if group and (created_reports or existing_reports):
-            all_codes = sorted(set(group.get_codes() + [
-                r['name'] for r in created_reports + existing_reports
-            ]))
-            group.symbols = ", ".join(all_codes)
-            group.save(update_fields=['symbols', 'updated_at'])
+        if hasattr(instance, "create_instruments"):
+            return instance.create_instruments()
 
         return {
-            'created': created_reports,
-            'existing': existing_reports,
-            'skipped': skipped_reports,
-            'total_created': len(created_reports),
-            'total_skipped': len(skipped_reports),
+            "saved": len(instance.instruments),
+            "instruments": instance.instruments,
         }
+
+
+# Aliases for backwards compatibility
+SymbolsSchema = InstrumentsSchema
 
 
 class StrategyInstanceItemSchema(BaseModel):
@@ -180,12 +131,17 @@ class StrategyInstancesSchema(BaseModel):
 
             instance_obj, created = StrategyInstance.objects.update_or_create(
                 strategy_model=strategy_obj,
-                instrument=instrument,
                 defaults={
                     'description': item.description or "",
                     'params': item.params or {},
                     'is_active': item.is_active,
                 }
+            )
+            from argo.models import StrategyInstrument
+            StrategyInstrument.objects.update_or_create(
+                strategy_instance=instance_obj,
+                instrument=instrument,
+                defaults={'key': 'instrument_id'}
             )
 
             report = get_asset_sync_info(instance_obj, created)
@@ -231,7 +187,12 @@ class StrategyInstanceOptimizeSchema(BaseModel):
         currency = self.currency or "USD"
 
         instrument = self._resolve_instrument(symbol_code, venue, asset_class, currency)
-        instance.instrument = instrument
+        from argo.models import StrategyInstrument
+        StrategyInstrument.objects.update_or_create(
+            strategy_instance=instance,
+            instrument=instrument,
+            defaults={'key': 'instrument_id'}
+        )
 
         # Populate and merge default strategy parameters with optimized params
         defaults = self._get_default_strategy_params(instance.strategy_model)

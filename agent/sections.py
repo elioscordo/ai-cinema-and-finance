@@ -12,17 +12,39 @@ from django.forms import modelform_factory
 from unfold.widgets import SELECT_CLASSES, Select, UnfoldAdminSelectWidget, UnfoldAdminTextareaWidget
 from unfold.sections import TemplateSection
 from django.utils.safestring import mark_safe
-from .widgets import DynamicMarkdownWidget as MarkdownWidget
+from .widgets import DynamicMarkdownWidget as MarkdownWidget, CodeWidget
 from django.db import models as db_models
 
 class AjaxSectionAdminMixin:
+    change_form_outer_after_template = "sections/change_form_sections.html"
+
     @property
     def media(self):
-        media = super().media
-        try:
-            media = media + MarkdownWidget().media
-        except Exception:
-            pass
+        media = super().media + forms.Media(js=['js/admin_ajax.js'])
+        sections = list(getattr(self, "list_sections", [])) + list(getattr(self, "changeform_sections", []))
+        has_markdown = False
+        has_code = False
+        for sec in sections:
+            if getattr(sec, "use_markdown_widgets", False):
+                has_markdown = True
+            form_class = getattr(sec, "form_class", None)
+            if form_class:
+                for field in getattr(form_class, "base_fields", {}).values():
+                    if getattr(field, "is_code", False) or getattr(field.widget, "is_code", False):
+                        has_code = True
+            elif getattr(sec, "is_code", False):
+                has_code = True
+
+        if has_markdown:
+            try:
+                media = media + MarkdownWidget().media
+            except Exception:
+                pass
+        if has_code:
+            try:
+                media = media + CodeWidget().media
+            except Exception:
+                pass
         return media
 
     def get_urls(self):
@@ -36,12 +58,17 @@ class AjaxSectionAdminMixin:
         ]
         
         # Discover and add URLs from sections
-        if hasattr(self, "list_sections"):
-            for section_class in self.list_sections:
-                if hasattr(section_class, "get_section_urls"):
-                    section_instance = section_class(request=None, instance=None)
-                    section_urls = section_instance.get_section_urls(self)
-                    custom_urls.extend(section_urls)
+        sections = list(getattr(self, "list_sections", [])) + list(getattr(self, "changeform_sections", []))
+        seen_keys = set()
+        for section_class in sections:
+            key = getattr(section_class, "key", getattr(section_class, "__name__", str(section_class)))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            if hasattr(section_class, "get_section_urls"):
+                section_instance = section_class(request=None, instance=None)
+                section_urls = section_instance.get_section_urls(self)
+                custom_urls.extend(section_urls)
         return custom_urls + urls
 
     def ajax_section_update_view(self, request):
@@ -365,23 +392,58 @@ class GenericFormSection(AjaxSection):
     title = _("Edit Details")
     key = "generic_form"
     collapsible = True
+    use_markdown_widgets = True
+    submit_label = _("Save Details")
 
-    def get_form_class(self, model):
+    def get_form_class(self, model=None):
         if self.form_class:
             FormClass = self.form_class
         else:
             widgets = {}
-            for field in model._meta.get_fields():
-                if self.fields == "__all__" or field.name in self.fields:
-                    if isinstance(field, db_models.TextField):
-                        widgets[field.name] = MarkdownWidget()
+            if model:
+                for field in model._meta.get_fields():
+                    if self.fields == "__all__" or field.name in self.fields:
+                        if isinstance(field, db_models.TextField) and self.use_markdown_widgets:
+                            widgets[field.name] = MarkdownWidget()
             FormClass = modelform_factory(model, fields=self.fields, widgets=widgets)
 
-        # Ensure any textarea widget on the form class is defaulted to MarkdownWidget
-        for field in FormClass.base_fields.values():
-            if isinstance(field.widget, forms.Textarea) and not isinstance(field.widget, MarkdownWidget):
-                field.widget = MarkdownWidget(attrs=field.widget.attrs)
+        if self.use_markdown_widgets:
+            # Ensure non-code textarea widgets default to MarkdownWidget
+            for field in FormClass.base_fields.values():
+                if getattr(field, "is_code", False) or getattr(field.widget, "is_code", False):
+                    continue
+                if isinstance(field.widget, forms.Textarea) and not isinstance(field.widget, MarkdownWidget):
+                    field.widget = MarkdownWidget(attrs=field.widget.attrs)
         return FormClass
+
+    def get_form(self, data=None, files=None, instance=None):
+        inst = instance if instance is not None else self.instance
+        FormClass = self.get_form_class(inst.__class__ if inst else None)
+        return FormClass(data=data, files=files, instance=inst)
+
+    def apply_widget_styling(self, form):
+        for field in form.fields.values():
+            if isinstance(field.widget, MarkdownWidget):
+                continue
+            elif getattr(field, "is_code", False) or getattr(field.widget, "is_code", False):
+                existing_class = field.widget.attrs.get("class", "")
+                field.widget.attrs.update({
+                    "class": f"{existing_class} unfold-input font-mono text-xs border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 rounded px-3 py-2 w-full leading-relaxed code-editor-textarea".strip(),
+                    "rows": getattr(field.widget, "attrs", {}).get("rows", 25),
+                    "spellcheck": "false",
+                    "data-code-editor": "true",
+                    "data-language": getattr(field.widget, "language", "python"),
+                })
+            elif isinstance(field.widget, forms.Textarea):
+                field.widget.attrs.update({"class": "unfold-input border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 rounded px-3 py-2 w-full text-sm"})
+            elif isinstance(field.widget, (forms.TextInput, forms.EmailInput, forms.NumberInput)):
+                field.widget.attrs.update({"class": "unfold-input border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 rounded h-10 px-3 w-full text-sm"})
+            elif isinstance(field.widget, forms.Select):
+                field.widget.attrs.update({"class": "unfold-select border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 rounded h-10 px-3 w-full text-sm"})
+
+    def save_form(self, form, instance):
+        """Hook to allow subclasses to customize saving."""
+        return form.save()
 
     @classmethod
     def get_section_urls(cls, model_admin):
@@ -404,38 +466,43 @@ class GenericFormSection(AjaxSection):
         instance = get_object_or_404(model_class, pk=object_id)
 
         section = cls(request=request, instance=instance)
-        FormClass = section.get_form_class(model_class)
-        form = FormClass(request.POST, request.FILES, instance=instance)
+        form = section.get_form(data=request.POST, files=request.FILES, instance=instance)
 
         if form.is_valid():
-            form.save()
-            instance.refresh_from_db()
-            context = section.get_context_data(request, instance)
-            context["is_loaded"] = True
-            html = render_to_string(
-                "sections/generic_form_section_content.html",
-                context,
-                request=request
-            )
-            return JsonResponse({
-                "status": "success",
-                "html": html,
-            })
-        else:
-            context = section.get_context_data(request, instance)
-            context["is_loaded"] = True
-            html = render_to_string(
-                "sections/generic_form_section_content.html",
-                {
-                    **context,
-                    "form": form,
-                },
-                request=request
-            )
-            return JsonResponse({
-                "status": "error",
-                "html": html,
-            }, status=400)
+            try:
+                section.save_form(form, instance)
+                if hasattr(instance, "refresh_from_db") and instance.pk:
+                    try:
+                        instance.refresh_from_db()
+                    except Exception:
+                        pass
+                context = section.get_context_data(request, instance)
+                context["is_loaded"] = True
+                html = render_to_string(
+                    "sections/generic_form_section_content.html",
+                    context,
+                    request=request
+                )
+                return JsonResponse({
+                    "status": "success",
+                    "html": html,
+                })
+            except Exception as e:
+                form.add_error(None, str(e))
+
+        section.apply_widget_styling(form)
+        context = section.get_context_data(request, instance)
+        context["is_loaded"] = True
+        context["form"] = form
+        html = render_to_string(
+            "sections/generic_form_section_content.html",
+            context,
+            request=request
+        )
+        return JsonResponse({
+            "status": "error",
+            "html": html,
+        }, status=400)
 
     @classmethod
     def refresh_view(cls, request, content_type_id, object_id):
@@ -455,19 +522,10 @@ class GenericFormSection(AjaxSection):
 
     def get_context_data(self, request, instance) -> dict:
         content_type = ContentType.objects.get_for_model(instance)
-        FormClass = self.get_form_class(instance.__class__)
-        form = FormClass(instance=instance)
+        form = self.get_form(instance=instance)
+        self.apply_widget_styling(form)
         submit_url = f"form-submit/{self.key}/{content_type.id}/{instance.pk}/"
-
-        for field in form.fields.values():
-            if isinstance(field.widget, MarkdownWidget):
-                continue
-            elif isinstance(field.widget, forms.Textarea):
-                field.widget.attrs.update({"class": "unfold-input border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 rounded px-3 py-2 w-full text-sm"})
-            elif isinstance(field.widget, (forms.TextInput, forms.EmailInput, forms.NumberInput)):
-                field.widget.attrs.update({"class": "unfold-input border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 rounded h-10 px-3 w-full text-sm"})
-            elif isinstance(field.widget, forms.Select):
-                field.widget.attrs.update({"class": "unfold-select border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 rounded h-10 px-3 w-full text-sm"})
+        refresh_url = f"refresh-section/{self.key}/{content_type.id}/{instance.pk}/"
 
         context = super().get_context_data(request, instance)
         context.update({
@@ -480,6 +538,8 @@ class GenericFormSection(AjaxSection):
             "collapsible": self.collapsible,
             "content_type_id": content_type.id,
             "submit_url": submit_url,
+            "refresh_url": refresh_url,
+            "submit_label": getattr(self, "submit_label", _("Save Details")),
         })
         return context
 

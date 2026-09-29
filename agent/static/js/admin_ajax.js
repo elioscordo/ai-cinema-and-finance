@@ -54,6 +54,11 @@ window.setHTMLWithScripts = (element, html) => {
             console.log("[AdminAjax] Initializing dynamic Markdown editors for element:", element);
             window.initializeMarkdownEditors(element);
         }
+
+        if (window.initializeCodeEditors) {
+            console.log("[AdminAjax] Initializing dynamic Code editors for element:", element);
+            window.initializeCodeEditors(element);
+        }
     });
 };
 
@@ -767,11 +772,15 @@ document.addEventListener('click', function(e) {
         }
         console.log("[AdminAjax] Found form container body:", formContainer);
 
-        // Force all EasyMDE markdown editors within the form container to sync their content
+        // Force all EasyMDE markdown editors and CodeMirror code editors within the form container to sync their content
         formContainer.querySelectorAll('textarea').forEach(textarea => {
             if (textarea.easymde) {
                 console.log("[AdminAjax] Syncing EasyMDE editor content back to textarea:", textarea.name);
                 syncEasyMDE(textarea);
+            }
+            if (textarea.codeEditor && typeof textarea.codeEditor.save === 'function') {
+                console.log("[AdminAjax] Syncing CodeEditor content back to textarea:", textarea.name);
+                textarea.codeEditor.save();
             }
         });
 

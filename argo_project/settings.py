@@ -123,6 +123,11 @@ UNFOLD = {
                         "link": reverse_lazy("admin:argo_backtest_changelist"),
                     },
                     {
+                        "title": _("Backtest Runs"),
+                        "icon": "history",
+                        "link": reverse_lazy("admin:argo_backtestrun_changelist"),
+                    },
+                    {
                         "title": _("Strategies"),
                         "icon": "psychology",
                         "link": reverse_lazy("admin:argo_strategy_changelist"),
@@ -278,14 +283,14 @@ TASK_TYPE_CHOICES = (
 
 SCHEMA_OUTPUT_WITH_MESSAGE = "outwithmsg"
 SCHEMA_CREATE_INSTRUCTIONS = "create_instructions"
-SCHEMA_SYMBOLS = "symbols"
+SCHEMA_INSTRUMENTS = "instruments"
 SCHEMA_INSTANCES = "instances"
 SCHEMA_OPTIMIZE = "optimize"
 
 AGENT_SCHEMA_CHOICES = [
     (SCHEMA_OUTPUT_WITH_MESSAGE, _("Output With Message")),
     (SCHEMA_CREATE_INSTRUCTIONS, _("Create Instructions")),
-    (SCHEMA_SYMBOLS, _("Symbols")),
+    (SCHEMA_INSTRUMENTS, _("Instruments")),
     (SCHEMA_INSTANCES, _("Strategy Instances")),
     (SCHEMA_OPTIMIZE, _("Optimize Strategy Instance")),
 ]
@@ -293,7 +298,7 @@ AGENT_SCHEMA_CHOICES = [
 AGENT_SCHEMAS = {
     SCHEMA_OUTPUT_WITH_MESSAGE: "agent.schemas.OutputWithMessageSchema",
     SCHEMA_CREATE_INSTRUCTIONS: "agent.schemas.CreateInstructionsSchema",
-    SCHEMA_SYMBOLS: "argo.schemas.SymbolsSchema",
+    SCHEMA_INSTRUMENTS: "argo.schemas.InstrumentsSchema",
     SCHEMA_INSTANCES: "argo.schemas.StrategyInstancesSchema",
     SCHEMA_OPTIMIZE: "argo.schemas.StrategyInstanceOptimizeSchema",
 }

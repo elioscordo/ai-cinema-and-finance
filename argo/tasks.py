@@ -27,6 +27,7 @@ class TaskRunBacktest:
             start=start_dt,
             end=end_dt,
             params_override=backtest.params_override or None,
+            backtest=backtest,
         )
 
         # Update Backtest record with calculated metrics

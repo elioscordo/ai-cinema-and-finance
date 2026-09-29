@@ -1,0 +1,222 @@
+/* Standalone Modern Code Editor for Django Unfold */
+
+.code-editor-wrapper {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    border: 1px solid #e5e7eb;
+    border-radius: 0.5rem;
+    background-color: #ffffff;
+    overflow: hidden;
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    margin-bottom: 0.5rem;
+}
+
+html.dark .code-editor-wrapper {
+    border-color: #374151;
+    background-color: #111827;
+    box-shadow: none;
+}
+
+/* Toolbar / Header */
+.code-editor-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 14px;
+    background-color: #f9fafb;
+    border-bottom: 1px solid #e5e7eb;
+    font-size: 11px;
+    font-weight: 500;
+    color: #6b7280;
+    user-select: none;
+}
+
+html.dark .code-editor-toolbar {
+    background-color: #1f2937;
+    border-color: #374151;
+    color: #9ca3af;
+}
+
+.code-editor-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-size: 10px;
+    font-weight: 600;
+    color: #4b5563;
+    background-color: #e5e7eb;
+    padding: 2px 7px;
+    border-radius: 4px;
+}
+
+html.dark .code-editor-badge {
+    color: #e5e7eb;
+    background-color: #374151;
+}
+
+.code-editor-info {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+/* Editor Main Body */
+.code-editor-body {
+    display: flex;
+    flex-direction: row;
+    position: relative;
+    height: 520px;
+    width: 100%;
+    overflow: hidden;
+    background-color: #ffffff;
+}
+
+html.dark .code-editor-body {
+    background-color: #111827;
+}
+
+/* Gutter & Line Numbers */
+.code-editor-gutter {
+    width: 50px;
+    flex-shrink: 0;
+    background-color: #f9fafb;
+    border-right: 1px solid #e5e7eb;
+    padding: 10px 0;
+    overflow: hidden;
+    user-select: none;
+    text-align: right;
+    box-sizing: border-box;
+}
+
+html.dark .code-editor-gutter {
+    background-color: #1f2937;
+    border-color: #374151;
+}
+
+.code-editor-line-num {
+    padding-right: 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 12px;
+    line-height: 20px;
+    color: #9ca3af;
+    white-space: nowrap;
+}
+
+html.dark .code-editor-line-num {
+    color: #6b7280;
+}
+
+.code-editor-line-num.active {
+    color: #2563eb;
+    font-weight: 600;
+}
+
+html.dark .code-editor-line-num.active {
+    color: #60a5fa;
+}
+
+/* Scroll Area & Dual Layer */
+.code-editor-area {
+    position: relative;
+    flex: 1 1 auto;
+    height: 100%;
+    overflow: hidden;
+}
+
+.code-editor-highlight,
+.code-editor-textarea {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace !important;
+    font-size: 13px !important;
+    line-height: 20px !important;
+    tab-size: 4 !important;
+    -moz-tab-size: 4 !important;
+    white-space: pre !important;
+    word-wrap: normal !important;
+    overflow-wrap: normal !important;
+    padding: 10px 14px !important;
+    margin: 0 !important;
+    border: none !important;
+    box-sizing: border-box !important;
+    letter-spacing: 0 !important;
+}
+
+.code-editor-highlight {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+    pointer-events: none;
+    z-index: 1;
+    color: #1f2937;
+}
+
+html.dark .code-editor-highlight {
+    color: #f3f4f6;
+}
+
+.code-editor-textarea {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    outline: none !important;
+    background: transparent !important;
+    color: transparent !important;
+    -webkit-text-fill-color: transparent !important;
+    caret-color: #2563eb !important;
+    resize: none !important;
+    overflow: auto !important;
+    z-index: 2;
+}
+
+html.dark .code-editor-textarea {
+    caret-color: #60a5fa !important;
+}
+
+.code-editor-textarea::selection {
+    background: rgba(191, 219, 254, 0.6) !important;
+    color: transparent !important;
+    -webkit-text-fill-color: transparent !important;
+}
+
+html.dark .code-editor-textarea::selection {
+    background: rgba(30, 58, 138, 0.7) !important;
+    color: transparent !important;
+    -webkit-text-fill-color: transparent !important;
+}
+
+/* Syntax Highlighting Tokens (Light mode) */
+.tok-kw { color: #7c3aed; font-weight: 600; }
+.tok-def { color: #2563eb; font-weight: 600; }
+.tok-class { color: #0d9488; font-weight: 600; }
+.tok-builtin { color: #0284c7; font-weight: 500; }
+.tok-atom { color: #0284c7; font-weight: 600; }
+.tok-self { color: #4f46e5; font-style: italic; }
+.tok-str { color: #059669; }
+.tok-docstr { color: #047857; font-style: italic; }
+.tok-num { color: #d97706; }
+.tok-comm { color: #6b7280; font-style: italic; }
+.tok-dec { color: #ea580c; font-weight: 600; }
+.tok-op { color: #4b5563; }
+
+/* Syntax Highlighting Tokens (Dark mode) */
+html.dark .tok-kw { color: #c084fc; font-weight: 600; }
+html.dark .tok-def { color: #60a5fa; font-weight: 600; }
+html.dark .tok-class { color: #2dd4bf; font-weight: 600; }
+html.dark .tok-builtin { color: #38bdf8; font-weight: 500; }
+html.dark .tok-atom { color: #38bdf8; font-weight: 600; }
+html.dark .tok-self { color: #a5b4fc; font-style: italic; }
+html.dark .tok-str { color: #34d399; }
+html.dark .tok-docstr { color: #6ee7b7; font-style: italic; }
+html.dark .tok-num { color: #fbbf24; }
+html.dark .tok-comm { color: #9ca3af; font-style: italic; }
+html.dark .tok-dec { color: #fb923c; font-weight: 600; }
+html.dark .tok-op { color: #9ca3af; }
