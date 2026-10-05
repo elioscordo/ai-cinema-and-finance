@@ -1,4 +1,3 @@
-
 indicator(etf sector)
 etf - xlk (street technology)
 etf500(open range breakout)
@@ -7,4 +6,4 @@ indicator (etf sp500) (filtra su breakout di sp500)
 top winner
 gap (parametro)
 open range breakout (5 min)
-open position
+open positionsorry 

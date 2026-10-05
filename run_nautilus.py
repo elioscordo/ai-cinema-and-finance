@@ -60,7 +60,7 @@ from nautilus_trader.trading import Strategy
 from nautilus_trader.trading.config import StrategyConfig
 from argo.strategies.one_cond import SimpleConditionsConfig
 from argo.strategies.one_cond import SimpleConditionsStrategy
-from argo.actors.event_logger import EventLoggerActor
+
 
 # %%
 
@@ -165,9 +165,6 @@ strategy = SimpleConditionsStrategy(config=strat_config)
 # Add your strategies and modules
 node.trader.add_strategy(strategy)
 
-# Register the Logger Actor
-event_logger = EventLoggerActor()
-node.trader.add_actor(event_logger)
 
 # Register your client factories with the node
 node.add_data_client_factory(IB, InteractiveBrokersLiveDataClientFactory)

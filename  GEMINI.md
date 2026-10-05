@@ -6,6 +6,7 @@
 - Edit only relevant lines rather than reproducing entire files.
 
 ## 2. Code Quality & Design Patterns
+- Be minimal amnd readable, do not overengineer and minimise the number of lines, report the number of lines used.
 - Apply clean design patterns (Mixins, Strategy pattern, Factories) for maintainability.
 - Keep functions and methods modular and short; avoid oversized monolithic functions.
 - Maintain documentation integrity: preserve unrelated existing comments and docstrings.

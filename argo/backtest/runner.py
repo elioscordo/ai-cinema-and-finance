@@ -10,7 +10,7 @@ import shutil
 import tempfile
 from typing import Dict, Any, Optional, Tuple
 from decimal import Decimal
-
+from nautilus_trader.persistence.catalog import ParquetDataCatalog
 from nautilus_trader.backtest.engine import BacktestEngine, BacktestEngineConfig
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.model.currencies import Currency
@@ -18,12 +18,23 @@ from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.enums import AccountType, AggregationSource, OmsType
 from nautilus_trader.model.identifiers import TraderId, Venue
 from nautilus_trader.model.objects import Money
-
-from argo.instruments.factories import NautilusInstrumentFactory
+from django.conf import settings
 from argo.backtest.data_loader import BacktestDataLoader
 from argo.backtest.results import BacktestResult
 
+from nautilus_trader.test_kit.providers import TestInstrumentProvider
+
 logger = logging.getLogger("argo.backtest")
+
+
+class NautilusInstrumentFactory:
+    """Factory creating Nautilus Instrument objects from Django Instrument models."""
+
+    @staticmethod
+    def create(instrument):
+        symbol = getattr(instrument, "symbol", str(instrument))
+        venue = getattr(instrument, "primary_exchange", None) or getattr(instrument, "exchange", None) or "SMART"
+        return TestInstrumentProvider.equity(symbol=symbol, venue=venue)
 
 
 class _LogCaptureHandler(logging.Handler):
@@ -64,9 +75,9 @@ class StrategyBacktestRunner:
         save_run: bool = True,
     ) -> BacktestResult:
         """Executes a backtest for the specified StrategyInstance."""
-        if not instance.instrument:
-            raise ValueError(f"StrategyInstance {instance} has no associated instruments.")
-
+        instr_params = instance.get_instruments_as_params() or {}
+        merged_params = {**(instance.params or {}), **(params_override or {})}
+        merged_params.update(instr_params)
         temp_log_dir = tempfile.mkdtemp(prefix="nautilus_run_log_")
 
         # Set up Python log capture covering entire run attached strictly to root logger
@@ -78,22 +89,14 @@ class StrategyBacktestRunner:
         stdout_buf = io.StringIO()
 
         try:
-            instrument = NautilusInstrumentFactory.create(instance.instrument)
-            bar_type = self._resolve_bar_type((instance.params or {}).get("bar_type"), instrument.id)
+            bar_type = instance.bar_type
 
             # Build engine & register all required venues
-            currency_str = instance.instrument.currency or "USD"
+            currency_str = "USD"
             engine = self._build_engine(currency_code=currency_str, log_dir=temp_log_dir)
             registered_venues: set[Venue] = set()
 
-            primary_venue = Venue(instance.instrument.venue or "SMART")
-            self._add_venue(engine, primary_venue, currency_str, registered_venues)
-
-            merged_params = {**(instance.params or {}), **(params_override or {})}
-
-            # Register all instruments associated with this instance and their respective venues
-            all_instruments = self._resolve_participating_instruments(instance, merged_params)
-            for instr in all_instruments:
+            for instr in instance.get_instruments():
                 n_instr = NautilusInstrumentFactory.create(instr)
                 self._add_venue(engine, n_instr.id.venue, currency_str, registered_venues)
                 engine.add_instrument(n_instr)
@@ -101,19 +104,17 @@ class StrategyBacktestRunner:
             # Load & feed historical bars for all participating instruments ensuring AggregationSource.EXTERNAL
             primary_bars = []
             total_bars_count = 0
-            for instr in all_instruments:
+            for instr in instance.get_instruments():
                 n_instr = NautilusInstrumentFactory.create(instr)
-                instr_bar_type = self._resolve_bar_type(merged_params.get("bar_type"), n_instr.id)
-                instr_bars = self._load_simulation_bars(instr, n_instr.id, instr_bar_type, start, end)
-                if instr_bars:
-                    engine.add_data(instr_bars)
-                    total_bars_count += len(instr_bars)
-                    if instr.id == instance.instrument.id:
-                        primary_bars = instr_bars
-
-            if not primary_bars and total_bars_count > 0:
-                primary_bars = instr_bars
-
+                catalog = ParquetDataCatalog(settings.HISTORICAL_ROOT)
+                bars = catalog.bars(
+                    bar_type=instr.get_nautilus_bar_type(bar_type),
+                    start=start,
+                    end=end,
+                )
+                if bars:
+                    engine.add_data(bars)
+                    total_bars_count += len(bars)
             # Instantiate strategy via StrategyInstance model (zero parameter assumptions)
             strategy = instance.instantiate_strategy(params_override=merged_params, bar_type=bar_type)
             engine.add_strategy(strategy)
@@ -185,24 +186,6 @@ class StrategyBacktestRunner:
             spec_str = f"{spec_str}-EXTERNAL"
         return BarType.from_str(spec_str)
 
-    def _resolve_participating_instruments(self, instance, merged_params: Optional[dict] = None) -> list:
-        """Resolves all participating instruments from instance relations and parameters."""
-        instruments = instance.get_instruments() or ([instance.instrument] if instance.instrument else [])
-        from argo.models import Instrument
-        instruments_dict = {i.id: i for i in instruments if i}
-
-        # Inspect parameter values generically for any referenced instruments
-        for val in (merged_params or {}).values():
-            items = [val] if isinstance(val, str) else (val if isinstance(val, (list, tuple)) else [])
-            for item in items:
-                if isinstance(item, str) and ("." in item or "/" in item):
-                    symbol = item.split(".")[0].split("/")[0].strip()
-                    matched = Instrument.objects.filter(symbol=symbol).first()
-                    if matched and matched.id not in instruments_dict:
-                        instruments_dict[matched.id] = matched
-
-        return list(instruments_dict.values())
-
     def _load_simulation_bars(self, instrument_model, instrument_id, bar_type: BarType, start: datetime.datetime, end: datetime.datetime) -> list:
         """Loads bars from configured catalog or instrument directory, ensuring EXTERNAL source."""
         bars = None
@@ -217,7 +200,8 @@ class StrategyBacktestRunner:
                     instr_catalog = str(HistoricalData(instrument=instrument_model).get_instrument_dir())
                     loader = BacktestDataLoader(catalog_path=instr_catalog)
                     bars = loader.load_bars(instrument_id, bar_type, start, end)
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"Could not load bars for {instrument_id} from instrument catalog: {e}")
                     bars = None
 
             if not bars:
@@ -354,7 +338,7 @@ class StrategyBacktestRunner:
         self,
         engine: BacktestEngine,
         instance,
-        instrument,
+        instruments,
         start,
         end,
         params,
@@ -410,7 +394,7 @@ class StrategyBacktestRunner:
         return BacktestResult(
             instance_id=instance.id,
             strategy_name=instance.strategy_model.name if instance.strategy_model else "Unknown",
-            instrument_id=str(instrument.id),
+            instrument_id=str(instruments[0].id),
             start_time=start.strftime("%Y-%m-%d %H:%M"),
             end_time=end.strftime("%Y-%m-%d %H:%M"),
             initial_capital=self.starting_balance,

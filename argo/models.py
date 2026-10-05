@@ -4,15 +4,42 @@ import re
 from pathlib import Path
 from django.db import models
 from django.conf import settings
-from .utils import discover_strategies
+from nautilus_trader.model.data import BarType
+from argo.ib.ib_download import IBDownloader
+from .utils import (
+    discover_strategies,
+    is_interval_empty,
+    is_market_closure_gap,
+    load_empty_intervals,
+)
 from django.utils.translation import gettext_lazy as _
 from simple_history.models import HistoricalRecords
 from task.mixins import AfterSaveActionMixin
 from task.models import TaskHolder
 from agent.models import GetContentsMixin, Agent
+from typing import Optional, List, Tuple, Dict, Any
+from django.utils import timezone
+from .mixins import CloneModelMixin
+from nautilus_trader.adapters.interactive_brokers.common import IBContract as NautilusIBContract
+from argo.ib.search import InteractiveBrokersSearchService
+from dataclasses import asdict
+from nautilus_trader.core.datetime import dt_to_unix_nanos, unix_nanos_to_dt
+from nautilus_trader.model.data import Bar
+from nautilus_trader.core.datetime import dt_to_unix_nanos
+from nautilus_trader.model.data import Bar
+from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
-
-
+class BarType(models.TextChoices):
+    SEC_1 = '1-SECOND', _('1 Second')
+    MIN_1 = '1-MINUTE', _('1 Minute')
+    MIN_5 = '5-MINUTE', _('5 Minutes')
+    MIN_15 = '15-MINUTE', _('15 Minutes')
+    MIN_30 = '30-MINUTE', _('30 Minutes')
+    HOUR_1 = '1-HOUR', _('1 Hour')
+    HOUR_4 = '4-HOUR', _('4 Hours')
+    DAY_1 = '1-DAY', _('1 Day')
+    WEEK_1 = '1-WEEK', _('1 Week')
+    MONTH_1 = '1-MONTH', _('1 Month')
 
 class Account(models.Model):
     """
@@ -240,7 +267,7 @@ class Strategy(models.Model, GetContentsMixin):
             return ""
 
 
-class Portfolio(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolder):
+class Portfolio(CloneModelMixin, AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolder):
     """
     A collection of strategy instances to be run together.
     """
@@ -287,11 +314,13 @@ class Portfolio(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolder
 
             instances_rel = getattr(self, 'strategy_instances', None)
             if instances_rel is not None:
-                instances = instances_rel.select_related('strategy_model', 'instrument').all()
-                inst_lines = [
-                    f"- Strategy: {si.strategy_model.name} ({si.strategy_model.class_path}), Instrument: {si.instrument}, Active: {si.is_active}, Params: {si.params}"
-                    for si in instances
-                ]
+                instances = instances_rel.select_related('strategy_model').prefetch_related('strategy_instruments__instrument').all()
+                inst_lines = []
+                for si in instances:
+                    instr_names = ", ".join(f"{sinstr.instrument.symbol} ({sinstr.key})" for sinstr in si.strategy_instruments.all() if sinstr.instrument)
+                    inst_lines.append(
+                        f"- Strategy: {si.strategy_model.name} ({si.strategy_model.class_path}), Instruments: [{instr_names}], Active: {si.is_active}, Params: {si.params}"
+                    )
                 parts.append(
                     "### Existing Strategy Instances:\n" + ("\n".join(inst_lines) if inst_lines else "None")
                 )
@@ -318,6 +347,11 @@ class Portfolio(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolder
 
         return parts
 
+    def _prepare_clone_fields(self, clone_obj, **kwargs):
+        """Prepares default description, resets active status, and adjusts fields prior to saving."""
+        super()._prepare_clone_fields(clone_obj, **kwargs)
+        if 'is_active' not in kwargs:
+            clone_obj.is_active = False
 
     @classmethod
     def sync_from_node(cls, node):
@@ -368,16 +402,19 @@ class Portfolio(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolder
                 defaults={'is_active': True}
             )
 
-            StrategyInstance.objects.update_or_create(
+            instance, _ = StrategyInstance.objects.update_or_create(
                 strategy_model=strategy_model,
-                instrument=instrument,
                 defaults={'params': strategy.config, 'is_active': True}
+            )
+            instance.strategy_instruments.update_or_create(
+                instrument=instrument,
+                defaults={'key': 'instrument_id'}
             )
         print(f"Synced {len(node.strategies)} strategy instance(s).")
         return portfolio
 
 
-class StrategyInstance(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolder):
+class StrategyInstance(CloneModelMixin, AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolder):
     """
     A specific, parameterized instance of a strategy for a given instrument.
     """
@@ -407,30 +444,63 @@ class StrategyInstance(AfterSaveActionMixin, models.Model, GetContentsMixin, Tas
         blank=True,
         help_text=_("Instruments associated with this strategy instance.")
     )
+    bar_type = models.CharField(max_length=50, null=True, blank=True, choices=BarType.choices, help_text=_("Bar type for historical data (e.g., MIN_1, HOUR_1)."))
     description = models.TextField(blank=True, help_text=_("Description or trading rationale for this instance."))
     params = models.JSONField(default=dict, blank=True, help_text="JSON object of strategy-specific parameters.")
     is_active = models.BooleanField(default=True)
     action = models.SlugField(_("action"), max_length=1024, choices=ACTION_CHOICES, null=True, blank=True)
     history = HistoricalRecords()
 
-    @property
-    def instrument(self) -> 'Instrument | None':
-        """Primary/default instrument for this strategy instance (key='instrument_id' or first)."""
-        si = self.strategy_instruments.filter(key='instrument_id').first() or self.strategy_instruments.first()
-        return si.instrument if si else None
 
     @property
-    def instrument_id(self) -> str:
-        inst = self.instrument
-        return inst.instrument_id_str if inst else ""
+    def instrument(self) -> Optional['Instrument']:
+        """Returns the primary instrument configured for this strategy instance."""
+        si = self.strategy_instruments.select_related('instrument').first()
+        if si and si.instrument:
+            return si.instrument
+        return self.instruments.first()
 
     def get_instruments(self) -> list['Instrument']:
         """Returns all distinct instruments configured for this instance."""
         return list(self.instruments.all())
 
-    def get_instruments_dict(self) -> dict[str, 'Instrument']:
-        """Returns key -> Instrument mapping for multi-instrument configurations."""
-        return {si.key: si.instrument for si in self.strategy_instruments.select_related('instrument')}
+    def get_instruments_as_params(self) -> dict[str, Any]:
+        """Returns key -> Instrument or key -> tuple of Instruments if multiple match."""
+        grouped: dict[str, list['Instrument']] = {}
+        for si in self.strategy_instruments.select_related('instrument'):
+            if si.instrument:
+                grouped.setdefault(si.key, []).append(si.instrument)
+        return {
+            key: instrs[0] if len(instrs) == 1 else tuple(instrs)
+            for key, instrs in grouped.items()
+        }
+
+    def get_instruments_dict(self) -> dict[str, Any]:
+        """Returns key -> Instrument or key -> tuple of Instruments mapping for multi-instrument configurations."""
+        return self.get_instruments_as_params()
+
+    def _prepare_clone_fields(self, clone_obj, **kwargs):
+        """Prepares default description and resets fields prior to saving the clone."""
+        super()._prepare_clone_fields(clone_obj, **kwargs)
+        if not clone_obj.description and 'description' not in kwargs:
+            strat_name = self.strategy_model.name if self.strategy_model else "Strategy"
+            clone_obj.description = f"Copy of {strat_name}"
+
+    def _clone_related(self, new_instance, **kwargs):
+        """Clones associated StrategyInstrument records to the new strategy instance."""
+        super()._clone_related(new_instance, **kwargs)
+        model_cls = self.strategy_instruments.model
+        instruments = [
+            model_cls(
+                strategy_instance=new_instance,
+                instrument=si.instrument,
+                key=si.key,
+                bar_type=si.bar_type,
+            )
+            for si in self.strategy_instruments.all()
+        ]
+        if instruments:
+            model_cls.objects.bulk_create(instruments)
 
     def task_from_action(self, action_type, user=None, message=None):
         """Creates a background Task corresponding to the specified action."""
@@ -492,17 +562,16 @@ class StrategyInstance(AfterSaveActionMixin, models.Model, GetContentsMixin, Tas
                 else:
                     merged_params.setdefault(key, instr_ids)
 
+        instruments = self.get_instruments()
         # Fallback for primary instrument ONLY if target explicitly expects instrument_id
-        if "instrument_id" in valid_params and "instrument_id" not in merged_params and self.instrument:
-            merged_params["instrument_id"] = self.instrument.instrument_id_str
+        if "instrument_id" in valid_params and "instrument_id" not in merged_params and instruments:
+            merged_params["instrument_id"] = instruments[0].instrument_id_str
 
         # Fallback for plural instrument_ids ONLY if target explicitly expects it
-        if "instrument_ids" in valid_params and "instrument_ids" not in merged_params:
-            instruments = self.get_instruments() or ([self.instrument] if self.instrument else [])
-            if instruments:
-                expected = str(type_hints.get("instrument_ids", "")).lower()
-                ids = [i.instrument_id_str for i in instruments]
-                merged_params["instrument_ids"] = tuple(ids) if "tuple" in expected else ids
+        if "instrument_ids" in valid_params and "instrument_ids" not in merged_params and instruments:
+            expected = str(type_hints.get("instrument_ids", "")).lower()
+            ids = [i.instrument_id_str for i in instruments]
+            merged_params["instrument_ids"] = tuple(ids) if "tuple" in expected else ids
 
         # Supply bar_type ONLY if target explicitly expects it
         if "bar_type" in valid_params:
@@ -534,8 +603,13 @@ class StrategyInstance(AfterSaveActionMixin, models.Model, GetContentsMixin, Tas
 
     def __str__(self):
         strat_name = self.strategy_model.name if self.strategy_model else "Unassigned Strategy"
-        instr = self.instrument
-        return f"{strat_name} on {instr}" if instr else f"{strat_name} (#{self.id})"
+        if not self.pk:
+            return strat_name
+        instruments = list(self.instruments.all()[:3])
+        if instruments:
+            symbols = ", ".join(i.symbol for i in instruments)
+            return f"{strat_name} ({symbols})"
+        return f"{strat_name} (#{self.id})"
 
     def get_contents(self, generate_self=True, preset=None):
         parts = []
@@ -554,10 +628,8 @@ class StrategyInstance(AfterSaveActionMixin, models.Model, GetContentsMixin, Tas
 
         instruments_list = list(self.strategy_instruments.select_related('instrument'))
         if instruments_list:
-            instr_lines = [f"- {si.key}: {si.instrument.symbol} ({si.instrument.venue}, {si.instrument.asset_class}, {si.instrument.currency})" for si in instruments_list]
+            instr_lines = [f"- {si.key}: {si.instrument.symbol} [{si.bar_type}] ({si.instrument.venue}, {si.instrument.asset_class}, {si.instrument.currency})" for si in instruments_list if si.instrument]
             parts.append("### Target Instruments:\n" + "\n".join(instr_lines))
-        elif self.instrument:
-            parts.append(f"### Target Instrument:\nSymbol: {self.instrument.symbol}, Venue: {self.instrument.venue}, Asset Class: {self.instrument.asset_class}, Currency: {self.instrument.currency}")
 
         if self.params:
             import json
@@ -584,6 +656,7 @@ class StrategyInstrument(models.Model):
     Connects a StrategyInstance to an Instrument, allowing multi-instrument strategies.
     Identified by a key string defaulting to 'instrument_id'.
     """
+ 
     strategy_instance = models.ForeignKey(
         StrategyInstance,
         on_delete=models.CASCADE,
@@ -601,6 +674,13 @@ class StrategyInstrument(models.Model):
         default="instrument_id",
         help_text=_("Identifier or role key for the instrument within the strategy, e.g. 'instrument_id'.")
     )
+    bar_type = models.CharField(
+        max_length=32,
+        choices=BarType.choices,
+        null=True,
+        blank=True,
+        help_text=_("Bar aggregation timeframe choice (defaults to 1-MINUTE).")
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -611,18 +691,19 @@ class StrategyInstrument(models.Model):
         ordering = ['strategy_instance', 'key']
 
     def __str__(self):
-        return f"{self.strategy_instance} - {self.key}: {self.instrument}"
+        return f"{self.strategy_instance} - {self.key}: {self.instrument} [{self.bar_type}]"
+
+    @property
+    def nautilus_bar_spec(self) -> str:
+        """Builds the Nautilus BarSpecification string (e.g. '1-MINUTE-LAST')."""
+        return self.bar_type
+
+    @property
+    def nautilus_bar_type(self):
+        """Builds a native Nautilus BarType identifier or object."""
+        return Instrument.get_nautilus_bar_type(self.instrument, self.bar_type)
 
 
-def normalize_bar_type_choice(val: str) -> str:
-    """Normalizes any BarType string or alias into a valid HistoricalData.BarType choice."""
-    if not val:
-        return HistoricalData.BarType.MIN_1
-    val_upper = str(val).upper()
-    for choice, _ in HistoricalData.BarType.choices:
-        if choice in val_upper:
-            return choice
-    return HistoricalData.BarType.MIN_1
 
 
 class HistoricalData(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolder):
@@ -630,23 +711,11 @@ class HistoricalData(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskH
     Persisted historical bar dataset for an Instrument and BarType.
     Stored exclusively in Parquet format within instrument-specific folders in HISTORICAL_ROOT.
     """
-    ACTION_LOAD_DATA = "load_data"
+    ACTION_SYNC_DATA = f"{settings.TASK_EXECUTE_FUNC}-func-sync_data"
 
     ACTION_CHOICES = (
-        (ACTION_LOAD_DATA, _("Load Historical Data")),
+        (ACTION_SYNC_DATA, _("Sync Historical Data")),
     )
-
-    class BarType(models.TextChoices):
-        SEC_1 = '1-SECOND', _('1 Second')
-        MIN_1 = '1-MINUTE', _('1 Minute')
-        MIN_5 = '5-MINUTE', _('5 Minutes')
-        MIN_15 = '15-MINUTE', _('15 Minutes')
-        MIN_30 = '30-MINUTE', _('30 Minutes')
-        HOUR_1 = '1-HOUR', _('1 Hour')
-        HOUR_4 = '4-HOUR', _('4 Hours')
-        DAY_1 = '1-DAY', _('1 Day')
-        WEEK_1 = '1-WEEK', _('1 Week')
-        MONTH_1 = '1-MONTH', _('1 Month')
 
     instrument = models.ForeignKey(
         'Instrument',
@@ -664,9 +733,10 @@ class HistoricalData(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskH
     end_date = models.DateTimeField(help_text=_("End timestamp of the dataset."))
     bar_count = models.PositiveIntegerField(default=0, help_text=_("Total number of bars in this dataset."))
     catalog_path = models.CharField(
+        _("catalog path"),
         max_length=512,
         blank=True,
-        help_text=_("Filesystem directory path of the Parquet dataset for this instrument.")
+        help_text=_("Filesystem path of the Parquet file (.parquet) for this dataset.")
     )
     summary = models.JSONField(
         default=dict,
@@ -693,7 +763,9 @@ class HistoricalData(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskH
         ]
 
     def __str__(self):
-        return f"{self.instrument.symbol} [{self.bar_type}] ({self.start_date.strftime('%Y-%m-%d')} to {self.end_date.strftime('%Y-%m-%d')}): {self.bar_count:,} bars"
+        s_date = self.start_date.strftime('%Y-%m-%d') if self.start_date else '?'
+        e_date = self.end_date.strftime('%Y-%m-%d') if self.end_date else '?'
+        return f"{self.instrument.symbol} [{self.bar_type}] ({s_date} to {e_date}): {self.bar_count:,} bars"
 
     def get_contents(self, generate_self=True, preset=None):
         return [
@@ -701,37 +773,27 @@ class HistoricalData(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskH
             f"Range: {self.start_date} to {self.end_date}",
             f"Bars: {self.bar_count:,}",
             f"Catalog: {self.catalog_path}",
-            f"Source: {self.source}",
+            f"Storage: Parquet",
         ]
+
+    @property
+    def nautilus_bar_spec(self) -> str:
+        """Returns the Nautilus BarSpecification string, e.g. '5-MINUTE-LAST'."""
+        return self.instrument.get_nautilus_bar_spec(self.bar_type)
 
     @property
     def nautilus_bar_type(self) -> str:
         """Builds the full Nautilus BarType identifier from instrument and bar_type choice."""
-        instr_id = getattr(self.instrument, 'instrument_id_str', f"{self.instrument.symbol}.{self.instrument.venue or 'SMART'}")
-        spec = self.bar_type or self.BarType.MIN_1
-        if "-MID-" not in spec and "-LAST-" not in spec and "-BID-" not in spec and "-ASK-" not in spec:
-            spec = f"{spec}-MID-EXTERNAL"
-        elif spec.endswith("-INTERNAL"):
-            spec = spec[:-9] + "-EXTERNAL"
-        elif not spec.endswith("-EXTERNAL"):
-            spec = f"{spec}-EXTERNAL"
-        return f"{instr_id}-{spec}"
+        return self.instrument.get_nautilus_bar_type(self.bar_type)
 
-    @property
-    def source(self) -> str:
-        """Auto-calculated source based on summary metadata or parquet file existence."""
-        if isinstance(self.summary, dict) and self.summary.get("source"):
-            return self.summary["source"]
-        target_dir = self.get_instrument_dir()
-        if target_dir.exists() and any(target_dir.rglob("*.parquet")):
-            return "parquet"
-        return "parquet"
-
-    def get_source_display(self) -> str:
-        return self.source.title()
 
     def get_instrument_dir(self) -> Path:
         """Returns the instrument-specific folder inside settings.HISTORICAL_ROOT."""
+        if self.catalog_path:
+            p = Path(self.catalog_path)
+            target = p.parent if str(p).endswith('.parquet') else p
+            target.mkdir(parents=True, exist_ok=True)
+            return target
         from django.conf import settings
         historical_root = getattr(settings, "HISTORICAL_ROOT", None) or os.path.join(settings.BASE_DIR, "historical_data")
         instr_folder = self.instrument.instrument_id_str.replace("/", "_")
@@ -739,78 +801,64 @@ class HistoricalData(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskH
         target_dir.mkdir(parents=True, exist_ok=True)
         return target_dir
 
-    def save(self, *args, **kwargs):
-        if not self.catalog_path:
-            self.catalog_path = str(self.get_instrument_dir())
-        super().save(*args, **kwargs)
-
-    def is_covered(self, start: datetime.datetime, end: datetime.datetime) -> bool:
-        """Checks if the requested time range is fully covered by this dataset."""
-        return self.start_date <= start and self.end_date >= end and self.bar_count > 0
-
-    def load_bars(self):
-        """Loads Nautilus Bar objects from the ParquetDataCatalog for this instrument."""
-        from nautilus_trader.model.data import BarType
-        from nautilus_trader.persistence.catalog import ParquetDataCatalog
-        catalog = ParquetDataCatalog(str(self.get_instrument_dir()))
-        bt = BarType.from_str(self.nautilus_bar_type)
-        bars = catalog.bars(bar_type=bt, start=self.start_date, end=self.end_date)
-        if not bars and "-EXTERNAL" in str(bt):
-            alt_bt = BarType.from_str(str(bt).replace("-EXTERNAL", "-INTERNAL"))
-            bars = catalog.bars(bar_type=alt_bt, start=self.start_date, end=self.end_date)
-        return list(bars) if bars else []
-
-    def load_data_task(self, owner=None, process=True):
-        """Wraps load_data in a background Task."""
-        from task.models import Task
-        task_type = getattr(settings, "TASK_LOAD_DATA", "load_data")
-        return Task.createTaskIfQueueEnabled(
-            subject=self,
-            task_type=task_type,
-            owner=owner,
-            payload={"func": "load_data"},
-            process=process,
+    def check_coverage(
+        self,
+        tolerance_days: int = 4,
+    ) -> list:
+        start_ns = dt_to_unix_nanos(self.start_date)
+        end_ns = dt_to_unix_nanos(self.end_date)
+        catalog = ParquetDataCatalog(settings.HISTORICAL_ROOT)
+        bar_type = self.nautilus_bar_type
+        missing = catalog.get_missing_intervals_for_request(
+            start=start_ns,
+            end=end_ns,
+            data_cls=Bar,
+            identifier=bar_type
         )
+        intervals = []
+        is_crypto = getattr(self.instrument, "sec_type", "") == "CRYPTO"
+        empty = load_empty_intervals(settings.HISTORICAL_ROOT, bar_type)
+        for s_ns, e_ns in missing:
+            if s_ns < e_ns:
+                s_dt = unix_nanos_to_dt(s_ns)
+                e_dt = unix_nanos_to_dt(e_ns)
+                # Skip verified empty intervals from catalog JSON
+                if is_interval_empty(s_dt, e_dt, empty):
+                    continue
+                # Skip expected weekend and holiday market closures
+                if not is_crypto and is_market_closure_gap(s_dt, e_dt, tolerance_days):
+                    continue
+                intervals.append((s_dt, e_dt))
+        return intervals
+    
+    def is_covered(
+        self,
+    ) -> bool:
+        """Checks if this dataset is healthy and covers the requested time range."""
+        return len(self.check_coverage()) == 0
 
-    def task_from_action(self, action_type, user=None):
-        """Creates a background Task corresponding to the specified action."""
-        if action_type == self.ACTION_LOAD_DATA:
-            return self.load_data_task(owner=user)
-        from task.models import Task
-        return Task.createTaskIfQueueEnabled(
-            subject=self,
-            task_type=action_type,
-            owner=user,
-        )
-
-    def load_data(self, as_task: bool = False, owner=None, force: bool = False) -> "HistoricalData":
+    def health_check(self):
+        """Runs integrity and alignment health check against the on-disk Parquet file."""
+        return self.is_covered()
+    
+    def sync_data(self) -> "HistoricalData":
         """
-        Loads historical bars into the ParquetDataCatalog for this dataset.
-        If as_task=True, delegates execution to a background task.
+        Synchronizes this HistoricalData model with the Parquet catalog on disk.
+        Completes and extends the parquet file if incomplete for the requested range.
+        Throws a ConnectionError if Interactive Brokers is offline or fails to return data.
         """
-        if as_task:
-            return self.load_data_task(owner=owner)
-
-        from argo.lib.ib_download import IBDataCatalogDownloader
-        downloader = IBDataCatalogDownloader()
-        catalog_dir = self.get_instrument_dir()
-
-        bar_count, summary = downloader.download(
-            instrument=self.instrument,
-            bar_type=self.bar_type,
-            start=self.start_date,
-            end=self.end_date,
-            catalog_path=str(catalog_dir),
-        )
-
-        self.bar_count = bar_count
-        self.catalog_path = str(catalog_dir)
-        self.summary = summary
-        self.save(update_fields=['bar_count', 'catalog_path', 'summary', 'updated_at'])
+        downloader = IBDownloader() 
+        for itervals in self.check_coverage():
+            start_dt, end_dt = itervals
+            downloader.download(
+                instrument=self.instrument,
+                start=start_dt,
+                end=end_dt,
+                bar_spec=self.nautilus_bar_spec,
+            )
         return self
 
-
-class Backtest(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolder):
+class Backtest(CloneModelMixin, AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolder):
     """
     Represents an isolated backtesting or parameter optimization experiment 
     for a StrategyInstance.
@@ -845,8 +893,8 @@ class Backtest(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolder)
     )
 
     name = models.CharField(max_length=150, blank=True, help_text=_("Experiment name (e.g. '2024 Macro Trend Run')."))
-    start_date = models.DateTimeField(help_text=_("Backtest start timestamp."))
-    end_date = models.DateTimeField(help_text=_("Backtest end timestamp."))
+    start_date = models.DateField(help_text=_("Backtest start timestamp."))
+    end_date = models.DateField(help_text=_("Backtest end timestamp."))
     initial_capital = models.DecimalField(max_digits=18, decimal_places=2, default=100000.0)
     commission_rate = models.FloatField(default=0.0001, help_text=_("Simulated broker commission percentage."))
 
@@ -889,161 +937,97 @@ class Backtest(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolder)
         label = self.name or f"Backtest #{self.id}"
         return f"{label} ({self.strategy_instance})"
 
-    def get_required_range(self) -> tuple[datetime.datetime, datetime.datetime, datetime.timedelta]:
-        """Calculates effective start, end, and duration delta for this backtest."""
-        from django.utils import timezone
-        start_dt = self.start_date or (timezone.now() - datetime.timedelta(days=90))
-        end_dt = self.end_date or timezone.now()
-        return start_dt, end_dt, (end_dt - start_dt)
+    def _prepare_clone_fields(self, clone_obj, **kwargs):
+        """Prepares fields for cloned backtest, clearing execution results and updating experiment name."""
+        super()._prepare_clone_fields(clone_obj, **kwargs)
+        if not clone_obj.name and 'name' not in kwargs:
+            strat_label = str(self.strategy_instance) if self.strategy_instance else "Backtest"
+            clone_obj.name = f"Copy of {strat_label}"
 
-    def get_instruments(self) -> list["Instrument"]:
-        """Returns all instruments required for this backtest."""
-        if not self.strategy_instance:
-            return []
-        instruments = self.strategy_instance.get_instruments()
-        if not instruments and self.strategy_instance.instrument:
-            instruments = [self.strategy_instance.instrument]
-        return instruments
-
-    def get_covering_historical_data(
-        self,
-        start: datetime.datetime | None = None,
-        end: datetime.datetime | None = None,
-        instrument: "Instrument | None" = None,
-    ):
-        """
-        Finds a HistoricalData record for the target instrument (or primary instrument)
-        whose time range covers the required period.
-        """
-        target = instrument or (self.strategy_instance.instrument if self.strategy_instance else None)
-        if not target:
-            return None
-
-        default_start, default_end, _ = self.get_required_range()
-        start_dt = start or default_start
-        end_dt = end or default_end
-        required_delta = end_dt - start_dt
-
-        raw_bar_type = (self.strategy_instance.params or {}).get("bar_type") if self.strategy_instance else None
-        bar_type_choice = normalize_bar_type_choice(raw_bar_type)
-
-        candidates = HistoricalData.objects.filter(
-            instrument=target,
-            bar_type=bar_type_choice,
-            start_date__lte=start_dt,
-            end_date__gte=end_dt,
-            bar_count__gt=0,
+        metric_fields = (
+            'total_pnl',
+            'return_pct',
+            'sharpe_ratio',
+            'sortino_ratio',
+            'calmar_ratio',
+            'max_drawdown_pct',
+            'profit_factor',
+            'win_rate',
+            'total_trades',
         )
-        for record in candidates:
-            if (record.end_date - record.start_date) >= required_delta:
-                return record
-        return None
+        for field in metric_fields:
+            if field not in kwargs:
+                setattr(clone_obj, field, None)
 
-    def get_all_covering_historical_data(
-        self,
-        start: datetime.datetime | None = None,
-        end: datetime.datetime | None = None,
-    ) -> list["HistoricalData"]:
-        """Finds covering historical datasets for all instruments in this backtest."""
-        datasets = []
+        if 'best_params' not in kwargs:
+            clone_obj.best_params = {}
+        if 'leaderboard' not in kwargs:
+            clone_obj.leaderboard = []
+
+    def get_instruments(self):
+        return self.strategy_instance.get_instruments()
+
+    def _resolve_bar_type_for_instrument(self, instr) -> str:
+        """Resolves the appropriate bar_type for an instrument within this backtest."""
+        si = self.strategy_instance.strategy_instruments.filter(instrument=instr).first() if self.strategy_instance else None
+        return (si.bar_type if si and si.bar_type else None) or (self.strategy_instance.bar_type if self.strategy_instance else None) or BarType.MIN_5
+
+    def is_covered(self) -> bool:
         for instr in self.get_instruments():
-            data = self.get_covering_historical_data(start=start, end=end, instrument=instr)
-            if data:
-                datasets.append(data)
-        return datasets
-
-    def is_covered(
-        self,
-        start: datetime.datetime | None = None,
-        end: datetime.datetime | None = None,
-    ) -> bool:
-        """
-        Checks if all instruments required for this backtest are covered by HistoricalData datasets.
-        """
-        instruments = self.get_instruments()
-        if not instruments:
-            return False
-        return all(self.get_covering_historical_data(start=start, end=end, instrument=instr) is not None for instr in instruments)
-
-    def load_data(
-        self,
-        force: bool = False,
-        catalog_path: str | None = None,
-        as_task: bool = False,
-        owner=None,
-    ):
-        """
-        Checks and loads historical data for all instruments required for this backtest.
-        If as_task=True, delegates execution to a background task.
-        """
-        start_dt, end_dt, _ = self.get_required_range()
-
-        if not self.start_date:
-            self.start_date = start_dt
-        if not self.end_date:
-            self.end_date = end_dt
-        if self.pk and not self._state.adding:
-            self.save(update_fields=['start_date', 'end_date'])
-
-        instruments = self.get_instruments()
-        raw_bar_type = (self.strategy_instance.params or {}).get("bar_type") if self.strategy_instance else None
-        bar_type_choice = normalize_bar_type_choice(raw_bar_type)
-        loaded = []
-
-        for instr in instruments:
-            if not force:
-                covering = self.get_covering_historical_data(start=start_dt, end=end_dt, instrument=instr)
-                if covering:
-                    loaded.append(covering)
-                    continue
-
-            record, _ = HistoricalData.objects.get_or_create(
+            bar_type = self._resolve_bar_type_for_instrument(instr)
+            hd = HistoricalData.objects.filter(
                 instrument=instr,
-                bar_type=bar_type_choice,
-                start_date=start_dt,
-                end_date=end_dt,
-            )
-            record.load_data(force=force)
-            loaded.append(record)
+                bar_type=bar_type,
+                start_date__lte=self.start_date,
+                end_date__gte=self.end_date,
+            ).first()
+            if not hd or not hd.is_covered():
+                return False
+        return True
 
-        return loaded[0] if len(loaded) == 1 else loaded
+    def check_coverage(self) -> list:
+        missing_intervals = []
+        for instr in self.get_instruments():
+            bar_type = self._resolve_bar_type_for_instrument(instr)
+            hd = HistoricalData.objects.filter(
+                instrument=instr,
+                bar_type=bar_type,
+                start_date__lte=self.start_date,
+                end_date__gte=self.end_date,
+            ).first()
+            if not hd or not hd.is_covered():
+                missing_intervals.append(hd.check_coverage())
+        return missing_intervals
+    
+    def load_data(self):
+        for instr in self.get_instruments():
+            bar_type = self._resolve_bar_type_for_instrument(instr)
+            hd = HistoricalData.objects.filter(
+                instrument=instr,
+                bar_type=bar_type,
+                start_date__lte=self.start_date,
+                end_date__gte=self.end_date,
+            ).first()
+            if not hd:
+                hd = HistoricalData.objects.create(
+                    instrument=instr,
+                    bar_type=bar_type,
+                    start_date=self.start_date,
+                    end_date=self.end_date,
+                )
+            if not hd.is_covered():
+                hd.sync_data()
+    
+
+    def sync_data(self, *args, **kwargs):
+        """Alias for load_data."""
+        return self.load_data(*args, **kwargs)
 
     def apply_best_params_to_instance(self):
         """Promotes the winning parameters back to the parent StrategyInstance."""
         if self.best_params and self.strategy_instance:
             self.strategy_instance.params = {**(self.strategy_instance.params or {}), **self.best_params}
             self.strategy_instance.save(update_fields=['params'])
-
-    def get_contents(self, generate_self=True, preset=None):
-        strat = self.strategy_instance.strategy_model if self.strategy_instance else "None"
-        instruments = self.get_instruments()
-        instr_str = ", ".join(str(i) for i in instruments) if instruments else "None"
-        parts = [
-            f"### Backtest: {self}",
-            f"- Strategy: {strat}",
-            f"- Instruments: {instr_str}",
-            f"- Period: {self.start_date} to {self.end_date}",
-            f"- Initial Capital: ${self.initial_capital:,.2f}",
-        ]
-        all_covering = self.get_all_covering_historical_data()
-        if instruments and len(all_covering) == len(instruments):
-            parts.append(
-                f"- Historical Data: Covered for all {len(instruments)} instrument(s)"
-            )
-        else:
-            parts.append(f"- Historical Data: Partially or not covered ({len(all_covering)}/{len(instruments)} covered, run load_data)")
-        if self.total_pnl is not None:
-            parts.append(
-                f"### Performance Metrics:\n"
-                f"- PnL: ${self.total_pnl:,.2f} ({self.return_pct:.2%})\n"
-                f"- Sharpe Ratio: {self.sharpe_ratio:.2f} | Sortino: {self.sortino_ratio:.2f} | Calmar: {self.calmar_ratio:.2f}\n"
-                f"- Max Drawdown: {self.max_drawdown_pct:.2%} | Win Rate: {self.win_rate:.1%}\n"
-                f"- Total Trades: {self.total_trades}"
-            )
-        if self.best_params:
-            import json
-            parts.append(f"### Best Optimized Parameters:\n```json\n{json.dumps(self.best_params, indent=2)}\n```")
-        return parts
 
 
 class BacktestRun(GetContentsMixin, models.Model):
@@ -1262,7 +1246,7 @@ class InstrumentGroup(AfterSaveActionMixin, models.Model, GetContentsMixin, Task
 
     PRESET_PROMPT_TO_INSTR = "prompt_to_instr"
 
-    ACTION_PROMPT_TO_INSTR = f"{TASK_TEXT_GENERATE}-preset-{PRESET_PROMPT_TO_INSTR}-schema-{getattr(settings, 'SCHEMA_INSTRUMENTS', 'instruments')}"
+    ACTION_PROMPT_TO_INSTR = f"{TASK_TEXT_GENERATE}-preset-{PRESET_PROMPT_TO_INSTR}-schema-{settings.SCHEMA_INSTRUMENTS}"
     ACTION_SEARCH_CREATE_INSTRUMENTS =  f"{settings.TASK_EXECUTE_FUNC}-func-create_instruments"
     
     ACTION_CHOICES = (
@@ -1284,6 +1268,12 @@ class InstrumentGroup(AfterSaveActionMixin, models.Model, GetContentsMixin, Task
         blank=True,
         help_text=_("Gateway JSON specifications for instruments (symbol, venue, asset_class, currency).")
     )
+    matches = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=_("Gateway JSON unfiltered matches")
+    )
+
     is_active = models.BooleanField(default=True)
 
     action = models.SlugField(_("action"), max_length=1024, choices=ACTION_CHOICES, null=True, blank=True)
@@ -1305,70 +1295,32 @@ class InstrumentGroup(AfterSaveActionMixin, models.Model, GetContentsMixin, Task
         parts = []
         parts.append(self.prompt)
         return parts
+    
+    def is_ib_match(self, match, item: dict) -> bool:
+        """Filters Interactive Brokers search matches based on the provided item criteria."""
+        contract = match["contract"]
+        excluded = ["exchange", "primaryExchange"]
+        for key, value in item.items():
+            if key not in excluded and key in contract and contract[key].strip() != "" and contract[key].upper() != value.upper():
+                return False
+        return True
 
     def create_instruments(self) -> dict:
         """Queries Interactive Brokers for each item in self.instruments and creates/links Instrument and IBContract records."""
-        from argo.instruments.search import InteractiveBrokersSearchService, ASSET_CLASS_TO_SEC_TYPE
-        from argo.models import AssetClass
-        from agent.schemas import get_asset_sync_info
-
-        raw_items = getattr(self, 'instruments', None) or getattr(self, 'instrument', None) or []
-        if isinstance(raw_items, str):
-            try:
-                import json
-                raw_items = json.loads(raw_items)
-            except Exception:
-                raw_items = []
-        items = raw_items if isinstance(raw_items, list) else []
-        if not items:
-            return {'created': [], 'existing': [], 'skipped': [], 'total_created': 0, 'total_skipped': 0}
-
-        created_reports, existing_reports, skipped_reports = [], [], []
         search_service = InteractiveBrokersSearchService()
-
-        for item in items:
+        all_matches = []
+        for item in self.instruments:
             code = (item.get("symbol") or "").strip().upper()
-            if not code:
-                continue
-
-            raw_asset_class = (item.get("asset_class") or getattr(self, "asset_class", None) or AssetClass.EQUITY).strip().upper()
-            asset_class = getattr(AssetClass, raw_asset_class, AssetClass.EQUITY) if hasattr(AssetClass, raw_asset_class) else AssetClass.EQUITY
-            venue = (item.get("venue") or getattr(self, "venue", None) or "").strip().upper()
-            currency = (item.get("currency") or getattr(self, "currency", None) or "USD").strip().upper()
-            sec_type = item.get("sec_type") or ASSET_CLASS_TO_SEC_TYPE.get(asset_class, "STK")
-
-            matches = []
-            try:
-                matches = search_service.search(query=code, sec_type=sec_type, currency=currency)
-            except Exception:
-                matches = []
-            match = next((m for m in matches if getattr(m, "symbol", "").upper() == code), None)
-
-            if not match:
-                skipped_reports.append({'symbol': code, 'status': 'skipped', 'reason': 'Not found on Interactive Brokers'})
-                continue
-
-            instrument, created = create_instrument_from_match(
-                match=match,
-                group=self,
-                venue=venue or None,
-                asset_class=asset_class,
-                currency=currency,
-            )
-
-            if instrument:
-                report = get_asset_sync_info(instrument, created)
-                (created_reports if created else existing_reports).append(report)
-
-        return {
-            'created': created_reports,
-            'existing': existing_reports,
-            'skipped': skipped_reports,
-            'total_created': len(created_reports),
-            'total_skipped': len(skipped_reports),
-        }
-
-
+            if code:
+                matches = search_service.search(query=code)
+                if len(matches) > 0:
+                    for match in matches:
+                        match = asdict(match)
+                        if self.is_ib_match(match, item):
+                            Instrument.create_from_ib(candidate=match, group=self)
+                        all_matches.append(match)
+        self.matches = all_matches
+        self.save()
 
 class Instrument(models.Model):
     """
@@ -1376,149 +1328,70 @@ class Instrument(models.Model):
     """
     groups = models.ManyToManyField(InstrumentGroup, related_name='linked_instruments', blank=True)
     symbol = models.CharField(max_length=64, db_index=True)
-    venue = models.CharField(max_length=32, db_index=True)
-    asset_class = models.CharField(max_length=16, choices=AssetClass.choices, default=AssetClass.EQUITY)
+    # IB contract fields
+    sec_type = models.CharField(max_length=16, default='STK', help_text="STK, FUT, OPT, CASH, IND, CRYPTO, CFD")
+    exchange = models.CharField(max_length=32, default='SMART')
+    primary_exchange = models.CharField(max_length=32, default='SMART')
     currency = models.CharField(max_length=8, default='USD')
-    quote_currency = models.CharField(max_length=8, null=True, blank=True)
-
-    price_precision = models.PositiveSmallIntegerField(default=2)
-    size_precision = models.PositiveSmallIntegerField(default=0)
-    price_increment = models.DecimalField(max_digits=12, decimal_places=6, default=0.01)
-    size_increment = models.DecimalField(max_digits=12, decimal_places=6, default=1.0)
-    lot_size = models.DecimalField(max_digits=12, decimal_places=4, default=1.0)
-    multiplier = models.DecimalField(max_digits=12, decimal_places=4, default=1.0)
-
-    is_active = models.BooleanField(default=True)
+    payload_ib = models.JSONField(default=dict, blank=True, help_text="Raw Interactive Brokers contract details.")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        unique_together = ('symbol', 'venue', 'asset_class')
-        ordering = ['symbol', 'venue']
+        ordering = ['symbol']
 
     def __str__(self):
-        return f"{self.symbol}.{self.venue} ({self.asset_class})"
+        return f"{self.symbol}.{self.exchange} ({self.sec_type})"
 
     @property
     def instrument_id_str(self) -> str:
-        return f"{self.symbol}.{self.venue}"
+        return f"{self.symbol}.{self.primary_exchange or self.exchange}"
 
 
-class IBContract(models.Model):
-    """
-    Interactive Brokers contract specification linked 1:1 with an Instrument.
-    """
-    instrument = models.OneToOneField(Instrument, on_delete=models.CASCADE, related_name='ib_contract')
-    con_id = models.PositiveBigIntegerField(unique=True, null=True, blank=True)
-    sec_type = models.CharField(max_length=16, default='STK', help_text="STK, FUT, OPT, CASH, IND, CRYPTO, CFD")
-    exchange = models.CharField(max_length=32, default='SMART')
-    primary_exchange = models.CharField(max_length=32, blank=True)
-    local_symbol = models.CharField(max_length=64, blank=True)
-    trading_class = models.CharField(max_length=32, blank=True)
+    def get_ib_contract(self):
+        primary_exch = self.primary_exchange
+        if not primary_exch or primary_exch.upper() == "SMART":
+            payload_contract = self.payload_ib.get("contract", {}) if isinstance(self.payload_ib, dict) else {}
+            primary_exch = payload_contract.get("primaryExchange", "")
+            if primary_exch.upper() == "SMART":
+                primary_exch = ""
 
-    expiration = models.DateField(null=True, blank=True)
-    strike = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
-    option_right = models.CharField(max_length=4, choices=OptionRight.choices, blank=True)
-    include_expired = models.BooleanField(default=False)
+        con_id = self.payload_ib.get("contract", {}).get("conId", 0) if isinstance(self.payload_ib, dict) else 0
 
-    class Meta:
-        verbose_name = _('IB Contract')
-        verbose_name_plural = _('IB Contracts')
+        return NautilusIBContract(
+            secType=self.sec_type, 
+            symbol=self.symbol, 
+            exchange=self.exchange or "SMART", 
+            primaryExchange=primary_exch,
+            currency=self.currency or "USD",
+            conId=con_id or 0,
+        )
 
-    def __str__(self):
-        return f"IB:{self.sec_type} {self.instrument.symbol} @ {self.exchange} (ID: {self.con_id or 'N/A'})"
+    def get_nautilus_bar_spec(self, bar_type: str = "1-MINUTE") -> str:
+        """Returns the Nautilus BarSpecification string, e.g. '1-MINUTE-LAST' or '1-MINUTE-MID'."""
+        spec = str(bar_type).strip()
+        if any(pt in spec for pt in ("-LAST", "-MID", "-BID", "-ASK")):
+            return spec.split("-EXTERNAL")[0].split("-INTERNAL")[0]
+        price_type = "MID" if self.sec_type in ("CASH", "FX") or getattr(self, "asset_class", "") in ("CASH", "FX") else "LAST"
+        return f"{spec}-{price_type}"
 
-
-def _update_ib_contract(contract: "IBContract", match, venue: str | None = None) -> bool:
-    """Updates contract fields if newer metadata is present."""
-    changed = False
-    sec_type = getattr(match, "sec_type", "") or ""
-    if sec_type and contract.sec_type != sec_type:
-        contract.sec_type = sec_type
-        changed = True
-    exchange = getattr(match, "exchange", "") or venue or ""
-    if exchange and contract.exchange != exchange:
-        contract.exchange = exchange
-        changed = True
-    primary_ex = getattr(match, "primary_exchange", "") or ""
-    if primary_ex and contract.primary_exchange != primary_ex:
-        contract.primary_exchange = primary_ex
-        changed = True
-    local_sym = getattr(match, "local_symbol", "") or ""
-    if local_sym and contract.local_symbol != local_sym:
-        contract.local_symbol = local_sym
-        changed = True
-    trading_cls = getattr(match, "trading_class", "") or ""
-    if trading_cls and contract.trading_class != trading_cls:
-        contract.trading_class = trading_cls
-        changed = True
-    if changed:
-        contract.save()
-    return changed
-
-
-def create_instrument_from_match(
-    match,
-    group: "InstrumentGroup | None" = None,
-    venue: str | None = None,
-    asset_class: str | None = None,
-    currency: str | None = None,
-) -> tuple["Instrument | None", bool]:
-    """
-    Factory function that creates or updates an Instrument and IBContract from a search match.
-    Optionally links the instrument to an InstrumentGroup.
-    Deduplicates by con_id to prevent database integrity errors with existing contracts.
-    """
-    if not match:
-        return None, False
-
-    symbol = getattr(match, "symbol", "")
-    if not symbol:
-        return None, False
-
-    con_id = getattr(match, "con_id", None)
-    if con_id is not None and con_id <= 0:
-        con_id = None
-
-    if con_id:
-        existing_contract = IBContract.objects.filter(con_id=con_id).select_related('instrument').first()
-        if existing_contract:
-            instrument = existing_contract.instrument
-            if group is not None:
-                instrument.groups.add(group)
-            _update_ib_contract(existing_contract, match, venue)
-            return instrument, False
-
-    resolved_venue = venue or getattr(match, "primary_exchange", "") or getattr(match, "exchange", "") or "SMART"
-    resolved_asset_class = (getattr(match, "asset_class", "") or None) or asset_class or AssetClass.EQUITY
-    resolved_currency = (getattr(match, "currency", "") or None) or currency or "USD"
-    sec_type = getattr(match, "sec_type", "") or "STK"
-    local_symbol = getattr(match, "local_symbol", "") or ""
-    trading_class = getattr(match, "trading_class", "") or ""
-    primary_exchange = getattr(match, "primary_exchange", "") or (resolved_venue if resolved_venue != "SMART" else "") or ""
-    exchange = getattr(match, "exchange", "") or resolved_venue or "SMART"
-
-    instrument, created = Instrument.objects.get_or_create(
-        symbol=symbol,
-        venue=resolved_venue,
-        asset_class=resolved_asset_class,
-        defaults={
-            'currency': resolved_currency,
-            'is_active': True,
-        },
-    )
-    if group is not None:
-        instrument.groups.add(group)
-
-    IBContract.objects.update_or_create(
-        instrument=instrument,
-        defaults={
-            'con_id': con_id,
-            'sec_type': sec_type,
-            'exchange': exchange,
-            'primary_exchange': primary_exchange,
-            'local_symbol': local_symbol,
-            'trading_class': trading_class,
-        },
-    )
-    return instrument, created
+    def get_nautilus_bar_type(self, bar_type: str = "1-MINUTE") -> str:
+        """Returns the full Nautilus BarType string, e.g. 'AAPL.SMART-5-MINUTE-LAST-EXTERNAL'."""
+        spec = str(bar_type).strip()
+        if "-EXTERNAL" in spec or "-INTERNAL" in spec:
+            return spec
+        return f"{self.instrument_id_str}-{self.get_nautilus_bar_spec(spec)}-EXTERNAL"
+    
+    @staticmethod
+    def create_from_ib( candidate:dict, group=None):
+        instance = Instrument.objects.create()
+        instance.payload_ib = candidate
+        contract = candidate["contract"]
+        for key in contract.keys():
+            if hasattr(instance, key):
+                setattr(instance, key, contract[key])
+        if "primaryExchange" in contract:
+            instance.primary_exchange = contract["primaryExchange"]
+        if group:
+            instance.groups.add(group)
+        instance.save()

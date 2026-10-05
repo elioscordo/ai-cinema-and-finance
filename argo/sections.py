@@ -69,6 +69,7 @@ from django.shortcuts import get_object_or_404
 from django.template.loader import render_to_string
 from django.urls import path
 from django.contrib.contenttypes.models import ContentType
+from django.views.decorators.clickjacking import xframe_options_exempt
 from agent.sections import AjaxSection
 from .models import BacktestRun
 
@@ -120,6 +121,7 @@ class BacktestRunSection(AjaxSection):
         return JsonResponse({"html": html, "count": runs.count()})
 
     @classmethod
+    @xframe_options_exempt
     def run_content_view(cls, request, run_id, content_type):
         run = get_object_or_404(BacktestRun, pk=run_id)
         is_ajax = request.headers.get("x-requested-with") == "XMLHttpRequest" or request.GET.get("format") == "json"

@@ -39,36 +39,33 @@
     color: #6b7280; /* Gray 500 */
 }
 
-/* Apply light font and custom color to desktop headers and responsive mobile labels */
+/* Apply clear font and high-contrast color to desktop headers and responsive mobile labels */
 .unfold-table thead th, 
 .changelist-form table thead th,
 .unfold-table th,
 .unfold-table td::before {
     font-family: 'Inter', sans-serif !important;
-    font-weight: 300 !important;
-    color: #6b7280 !important; /* Tailwind gray-500 for a lighter look */
-    text-transform: uppercase;
-    letter-spacing: 0.025em;
-    font-weight: 200 !important;
-    color: var(--color-font-subtle-light) !important;
+    font-weight: 600 !important;
+    color: #374151 !important; /* Tailwind gray-700 for crisp, high-contrast headers */
     text-transform: none !important;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.025em;
 }
 
 /* Dark mode overrides for headers */
 .dark .unfold-table thead th, 
 .dark .unfold-table th,
 .dark .unfold-table td::before {
-    color: #9ca3af !important; /* Gray 400 */
-    color: var(--color-font-subtle-dark) !important;
+    color: #e5e7eb !important; /* Tailwind gray-200 */
 }
 
-/* Links and row text lighter than the responsive headers (#6b7280) */
+/* Darker gray row text for high-contrast admin changelists and object tables */
 .unfold-table tbody td,
+.changelist-form table tbody td,
+.result-list tbody td,
 .data-row td {
     font-family: 'Inter', sans-serif !important;
-    font-weight: 300 !important;
-    color: #9ca3af !important;
+    font-weight: 400 !important;
+    color: #1f2937 !important; /* Tailwind gray-800 - significantly darker for high contrast */
 }
 
 .unfold-table tbody td a,
@@ -81,10 +78,12 @@
     transition: color 0.2s ease;
 }
 
-/* Dark mode overrides for row text and links - lighter than headers */
+/* Dark mode overrides for row text - high contrast */
 .dark .unfold-table tbody td,
+.dark .changelist-form table tbody td,
+.dark .result-list tbody td,
 .dark .data-row td {
-    color: #d1d5db !important; /* Gray 300 */
+    color: #f3f4f6 !important; /* Tailwind gray-100 */
 }
 
 .dark .unfold-table tbody td a,
@@ -125,31 +124,25 @@
 .unfold-table thead th,
 .unfold-table thead th a,
 .unfold-table thead th .text {
-    color: var(--color-font-default-light) !important;
-    font-weight: 500 !important;
-    color: var(--color-font-subtle-light) !important;
-    font-weight: 200 !important;
+    color: #374151 !important; /* Tailwind gray-700 for high-contrast headers */
+    font-weight: 600 !important;
     text-transform: none !important;
 }
 
 .dark .unfold-table thead th,
 .dark .unfold-table thead th a,
 .dark .unfold-table thead th .text {
-    color: var(--color-font-default-dark) !important;
-    color: var(--color-font-subtle-dark) !important;
+    color: #e5e7eb !important; /* Tailwind gray-200 */
 }
 
-/* Target the responsive labels used in mobile view to make them less prominent */
+/* Target the responsive labels used in mobile view */
 .unfold-table [data-label]::before {
-    color: var(--color-font-default-light) !important;
-    font-weight: 500 !important;
-    color: var(--color-font-subtle-light) !important;
-    font-weight: 200 !important;
+    color: #374151 !important;
+    font-weight: 600 !important;
 }
 
 .dark .unfold-table [data-label]::before {
-    color: var(--color-font-default-dark) !important;
-    color: var(--color-font-subtle-dark) !important;
+    color: #d1d5db !important;
 }
 
 /* Audio Player Styling */

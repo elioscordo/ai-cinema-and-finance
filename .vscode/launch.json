@@ -23,12 +23,46 @@
             "program": "${workspaceFolder}/manage.py"
         },
         {
-            "name": "Argo Search test",
+            "name": "Argo Search test search",
             "type": "debugpy",
             "request": "launch",
             "args": [
                 "test",
-                "argo.tests.SymbolsSchemaLiveTest.test_search",
+                "argo.tests.test_ib.SearchTest.test_search_create",
+                "--keepdb",
+                "--settings=argo_project.settings"
+            ],
+            "env": {
+                "DJANGO_SETTINGS_MODULE": "argo_project.settings"
+            },
+            "django": true,
+            "autoStartBrowser": false,
+            "program": "${workspaceFolder}/manage.py"
+        },
+        {
+            "name": "IB test_load_data",
+            "type": "debugpy",
+            "request": "launch",
+            "args": [
+                "test",
+                "argo.tests.test_ib.HistoricTest.test_load_data",
+                "--keepdb",
+                "--settings=argo_project.settings"
+            ],
+            "env": {
+                "DJANGO_SETTINGS_MODULE": "argo_project.settings"
+            },
+            "django": true,
+            "autoStartBrowser": false,
+            "program": "${workspaceFolder}/manage.py"
+        },
+        {
+            "name": "IB backtest",
+            "type": "debugpy",
+            "request": "launch",
+            "args": [
+                "test",
+                "argo.tests.test_backtest.TestBacktest.test_run_breakout",
                 "--keepdb",
                 "--settings=argo_project.settings"
             ],
@@ -93,7 +127,7 @@
             "request": "launch",
             "args": [
                 "makemigrations",
-                
+                "argo",
                 "--settings=argo_project.settings"
             ],
             "env": {

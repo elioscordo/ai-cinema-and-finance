@@ -1,98 +1,210 @@
 {% load i18n %}
 {% if runs %}
-<div class="overflow-x-auto">
-    <table class="w-full text-left text-xs border-collapse">
-        <thead>
-            <tr class="border-b border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400 uppercase tracking-wider font-semibold text-[11px]">
-                <th class="py-2.5 px-3">{% trans "Run ID" %}</th>
-                <th class="py-2.5 px-3">{% trans "Executed At" %}</th>
-                <th class="py-2.5 px-3">{% trans "Net PnL" %}</th>
-                <th class="py-2.5 px-3">{% trans "Return" %}</th>
-                <th class="py-2.5 px-3">{% trans "Sharpe" %}</th>
-                <th class="py-2.5 px-3">{% trans "Max DD" %}</th>
-                <th class="py-2.5 px-3">{% trans "Trades (Win %)" %}</th>
-                <th class="py-2.5 px-3 text-right">{% trans "Popups / Actions" %}</th>
-            </tr>
-        </thead>
-        <tbody class="divide-y divide-gray-100 dark:divide-gray-800/60 font-mono">
-            {% for run in runs %}
-            <tr class="hover:bg-gray-50 dark:hover:bg-gray-800/40 transition-colors">
-                <td class="py-2.5 px-3 font-bold text-gray-900 dark:text-gray-100">
-                    <a href="{% url 'admin:argo_backtestrun_change' run.id %}" target="_blank" class="hover:underline text-primary-600 dark:text-primary-400 inline-flex items-center gap-1 font-sans">
-                        <span>#{{ run.id }}</span>
-                        <span class="material-symbols-outlined text-[13px] opacity-70">open_in_new</span>
-                    </a>
-                </td>
-                <td class="py-2.5 px-3 text-gray-600 dark:text-gray-400 whitespace-nowrap font-sans text-xs">
-                    {{ run.created_at|date:"Y-m-d H:i" }}
-                </td>
-                <td class="py-2.5 px-3 font-semibold whitespace-nowrap {% if run.total_pnl > 0 %}text-emerald-600 dark:text-emerald-400{% elif run.total_pnl < 0 %}text-rose-600 dark:text-rose-400{% else %}text-gray-500{% endif %}">
-                    {% if run.total_pnl is not None %}${{ run.total_pnl|floatformat:2 }}{% else %}-{% endif %}
-                </td>
-                <td class="py-2.5 px-3 whitespace-nowrap font-medium {% if run.return_pct > 0 %}text-emerald-600 dark:text-emerald-400{% elif run.return_pct < 0 %}text-rose-600 dark:text-rose-400{% else %}text-gray-500{% endif %}">
-                    {% if run.return_pct is not None %}{{ run.return_pct|floatformat:2 }}%{% else %}-{% endif %}
-                </td>
-                <td class="py-2.5 px-3 whitespace-nowrap">
-                    {% if run.sharpe_ratio is not None %}{{ run.sharpe_ratio|floatformat:2 }}{% else %}-{% endif %}
-                </td>
-                <td class="py-2.5 px-3 whitespace-nowrap text-rose-500">
-                    {% if run.max_drawdown_pct is not None %}{{ run.max_drawdown_pct|floatformat:2 }}%{% else %}-{% endif %}
-                </td>
-                <td class="py-2.5 px-3 whitespace-nowrap font-sans text-xs">
-                    <span class="font-bold">{{ run.total_trades|default:"0" }}</span>
-                    {% if run.win_rate is not None %}<span class="text-gray-400 text-[11px] ml-1">({{ run.win_rate|floatformat:1 }}%)</span>{% endif %}
-                </td>
-                <td class="py-2.5 px-3 text-right whitespace-nowrap font-sans">
-                    <div class="inline-flex items-center gap-1.5 justify-end">
-                        <!-- Popup Log Link -->
-                        {% if run.log %}
-                        <button type="button"
-                                @click="openPopup({{ run.id }}, 'log', 'Run #{{ run.id }} - Execution Log')"
-                                class="cursor-pointer inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-md bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-primary-50 dark:hover:bg-primary-900/40 hover:text-primary-600 dark:hover:text-primary-400 border border-gray-200 dark:border-gray-700 transition"
-                                title="{% trans 'View execution log popup' %}">
-                            <span class="material-symbols-outlined text-[14px]">terminal</span>
-                            <span>{% trans "Log" %}</span>
-                        </button>
-                        {% endif %}
+<div class="flex flex-col gap-2.5 w-full">
+    <!-- Fixed & Scrollable Runs Table with Compact Line Height -->
+    <div class="w-full max-h-48 sm:max-h-56 overflow-y-auto overflow-x-auto border border-gray-200 dark:border-gray-800 rounded-md shadow-2xs bg-white dark:bg-gray-900 scrollbar-thin">
+        <table class="w-full text-left text-xs border-collapse">
+            <thead class="sticky top-0 z-10 bg-gray-100 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 shadow-2xs">
+                <tr class="text-gray-700 dark:text-gray-300 uppercase tracking-wider font-semibold text-[10px] leading-tight">
+                    <th class="py-1.5 px-2.5">{% trans "Run ID" %}</th>
+                    <th class="py-1.5 px-2">{% trans "Executed At" %}</th>
+                    <th class="py-1.5 px-2">{% trans "Net PnL" %}</th>
+                    <th class="py-1.5 px-2">{% trans "Return" %}</th>
+                    <th class="py-1.5 px-2">{% trans "Sharpe" %}</th>
+                    <th class="py-1.5 px-2">{% trans "Max DD" %}</th>
+                    <th class="py-1.5 px-2">{% trans "Trades (Win %)" %}</th>
+                    <th class="py-1.5 px-2.5 text-right">{% trans "Inspect in Canvas" %}</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100 dark:divide-gray-800/60 font-mono text-[11px] leading-tight">
+                {% for run in runs %}
+                <tr data-run-id="{{ run.id }}"
+                    @click="selectRun({{ run.id }})"
+                    :class="selectedRunId === {{ run.id }} ? 'bg-primary-50/70 dark:bg-primary-950/40 border-l-2 border-primary-500' : 'hover:bg-gray-50 dark:hover:bg-gray-800/40'"
+                    class="cursor-pointer transition-colors">
+                    <td class="py-1 px-2.5 font-bold text-gray-900 dark:text-gray-100 whitespace-nowrap">
+                        <span class="inline-flex items-center gap-1 font-sans text-xs" :class="selectedRunId === {{ run.id }} ? 'text-primary-600 dark:text-primary-400 font-bold' : ''">
+                            <span>#{{ run.id }}</span>
+                        </span>
+                    </td>
+                    <td class="py-1 px-2 text-gray-600 dark:text-gray-400 whitespace-nowrap font-sans text-[11px]">
+                        {{ run.created_at|date:"Y-m-d H:i" }}
+                    </td>
+                    <td class="py-1 px-2 font-semibold whitespace-nowrap {% if run.total_pnl > 0 %}text-emerald-600 dark:text-emerald-400{% elif run.total_pnl < 0 %}text-rose-600 dark:text-rose-400{% else %}text-gray-500{% endif %}">
+                        {% if run.total_pnl is not None %}${{ run.total_pnl|floatformat:2 }}{% else %}-{% endif %}
+                    </td>
+                    <td class="py-1 px-2 whitespace-nowrap font-medium {% if run.return_pct > 0 %}text-emerald-600 dark:text-emerald-400{% elif run.return_pct < 0 %}text-rose-600 dark:text-rose-400{% else %}text-gray-500{% endif %}">
+                        {% if run.return_pct is not None %}{{ run.return_pct|floatformat:-4 }}%{% else %}-{% endif %}
+                    </td>
+                    <td class="py-1 px-2 whitespace-nowrap">
+                        {% if run.sharpe_ratio is not None %}{{ run.sharpe_ratio|floatformat:-4 }}{% else %}-{% endif %}
+                    </td>
+                    <td class="py-1 px-2 whitespace-nowrap text-rose-500">
+                        {% if run.max_drawdown_pct is not None %}{{ run.max_drawdown_pct|floatformat:-4 }}%{% else %}-{% endif %}
+                    </td>
+                    <td class="py-1 px-2 whitespace-nowrap font-sans text-[11px]">
+                        <span class="font-bold">{{ run.total_trades|default:"0" }}</span>
+                        {% if run.win_rate is not None %}<span class="text-gray-400 text-[10px] ml-1">({{ run.win_rate|floatformat:-4 }}%)</span>{% endif %}
+                    </td>
+                    <td class="py-1 px-2.5 text-right whitespace-nowrap font-sans">
+                        <div class="inline-flex items-center gap-1 justify-end">
+                            <!-- Canvas Log Button -->
+                            {% if run.log %}
+                            <button type="button"
+                                    @click.stop="selectRun({{ run.id }}, 'log')"
+                                    :class="(selectedRunId === {{ run.id }} && activeTab === 'log') ? 'bg-primary-600 text-white font-semibold shadow-2xs' : 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-primary-50 dark:hover:bg-primary-900/40 hover:text-primary-600 dark:hover:text-primary-400 border border-gray-200 dark:border-gray-700'"
+                                    class="cursor-pointer inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] leading-none rounded transition"
+                                    title="{% trans 'View Log in Canvas' %}">
+                                <span class="material-symbols-outlined text-[12px]">terminal</span>
+                                <span>{% trans "Log" %}</span>
+                            </button>
+                            {% endif %}
 
-                        <!-- Popup HTML Tearsheet Link -->
-                        {% if run.html_report %}
-                        <button type="button"
-                                @click="openPopup({{ run.id }}, 'html', 'Run #{{ run.id }} - HTML Tearsheet')"
-                                class="cursor-pointer inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-md bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 border border-emerald-200 dark:border-emerald-800 transition"
-                                title="{% trans 'View interactive HTML tearsheet popup' %}">
-                            <span class="material-symbols-outlined text-[14px]">analytics</span>
-                            <span>{% trans "HTML" %}</span>
-                        </button>
-                        {% endif %}
+                            <!-- Canvas Code Button -->
+                            {% if run.code %}
+                            <button type="button"
+                                    @click.stop="selectRun({{ run.id }}, 'code')"
+                                    :class="(selectedRunId === {{ run.id }} && activeTab === 'code') ? 'bg-indigo-600 text-white font-semibold shadow-2xs' : 'bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 border border-indigo-200 dark:border-indigo-800'"
+                                    class="cursor-pointer inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] leading-none rounded transition"
+                                    title="{% trans 'View Code in Canvas' %}">
+                                <span class="material-symbols-outlined text-[12px]">code</span>
+                                <span>{% trans "Code" %}</span>
+                            </button>
+                            {% endif %}
 
-                        <!-- Popup Code Link -->
-                        {% if run.code %}
-                        <button type="button"
-                                @click="openPopup({{ run.id }}, 'code', 'Run #{{ run.id }} - Executed Code Snapshot')"
-                                class="cursor-pointer inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-md bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 border border-indigo-200 dark:border-indigo-800 transition"
-                                title="{% trans 'View strategy source code popup' %}">
-                            <span class="material-symbols-outlined text-[14px]">code</span>
-                            <span>{% trans "Code" %}</span>
-                        </button>
-                        {% endif %}
+                            <!-- Canvas Config Button -->
+                            {% if run.config %}
+                            <button type="button"
+                                    @click.stop="selectRun({{ run.id }}, 'config')"
+                                    :class="(selectedRunId === {{ run.id }} && activeTab === 'config') ? 'bg-amber-600 text-white font-semibold shadow-2xs' : 'bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-900/50 border border-amber-200 dark:border-amber-800'"
+                                    class="cursor-pointer inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] leading-none rounded transition"
+                                    title="{% trans 'View Config in Canvas' %}">
+                                <span class="material-symbols-outlined text-[12px]">tune</span>
+                                <span>{% trans "Config" %}</span>
+                            </button>
+                            {% endif %}
 
-                        <!-- Popup Config Link -->
-                        {% if run.config %}
-                        <button type="button"
-                                @click="openPopup({{ run.id }}, 'config', 'Run #{{ run.id }} - Configuration')"
-                                class="cursor-pointer inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-md bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-900/50 border border-amber-200 dark:border-amber-800 transition"
-                                title="{% trans 'View configuration JSON popup' %}">
-                            <span class="material-symbols-outlined text-[14px]">tune</span>
-                            <span>{% trans "Config" %}</span>
-                        </button>
-                        {% endif %}
+                            <!-- Canvas HTML Tearsheet Button (Injected via AJAX) -->
+                            {% if run.html_report %}
+                            <button type="button"
+                                    @click.stop="selectRun({{ run.id }}, 'html')"
+                                    :class="(selectedRunId === {{ run.id }} && activeTab === 'html') ? 'bg-emerald-600 text-white font-semibold shadow-2xs' : 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 border border-emerald-200 dark:border-emerald-800'"
+                                    class="cursor-pointer inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] leading-none rounded transition"
+                                    title="{% trans 'Inject Tearsheet in Canvas' %}">
+                                <span class="material-symbols-outlined text-[12px]">analytics</span>
+                                <span>{% trans "HTML" %}</span>
+                            </button>
+                            {% endif %}
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Mobile-First Inspection Canvas Below Table -->
+    <div class="w-full border border-gray-200 dark:border-gray-800 rounded-lg overflow-hidden bg-slate-950 shadow-sm flex flex-col">
+        <!-- Canvas Toolbar -->
+        <div class="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-slate-900 border-b border-slate-800 text-xs">
+            <div class="flex items-center gap-2 overflow-x-auto no-scrollbar py-0.5">
+                <!-- Active Run Badge -->
+                <template x-if="selectedRunId">
+                    <div class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold bg-primary-950 text-primary-300 border border-primary-800/60 whitespace-nowrap">
+                        <span class="material-symbols-outlined text-[13px] text-primary-400">deployed_code</span>
+                        <span>Run #<span x-text="selectedRunId"></span></span>
                     </div>
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+                </template>
+
+                <!-- Responsive Tab Switchers -->
+                <div class="inline-flex items-center gap-0.5 rounded bg-slate-950/80 p-0.5 border border-slate-800">
+                    <button type="button"
+                            @click="switchTab('log')"
+                            :class="activeTab === 'log' ? 'bg-slate-800 text-primary-400 font-semibold shadow-xs' : 'text-slate-400 hover:text-slate-200'"
+                            class="cursor-pointer inline-flex items-center gap-1 px-2 py-0.5 text-[10px] rounded transition">
+                        <span class="material-symbols-outlined text-[12px]">terminal</span>
+                        <span>{% trans "Log" %}</span>
+                    </button>
+                    <button type="button"
+                            @click="switchTab('code')"
+                            :class="activeTab === 'code' ? 'bg-slate-800 text-indigo-400 font-semibold shadow-xs' : 'text-slate-400 hover:text-slate-200'"
+                            class="cursor-pointer inline-flex items-center gap-1 px-2 py-0.5 text-[10px] rounded transition">
+                        <span class="material-symbols-outlined text-[12px]">code</span>
+                        <span>{% trans "Code" %}</span>
+                    </button>
+                    <button type="button"
+                            @click="switchTab('config')"
+                            :class="activeTab === 'config' ? 'bg-slate-800 text-amber-400 font-semibold shadow-xs' : 'text-slate-400 hover:text-slate-200'"
+                            class="cursor-pointer inline-flex items-center gap-1 px-2 py-0.5 text-[10px] rounded transition">
+                        <span class="material-symbols-outlined text-[12px]">tune</span>
+                        <span>{% trans "Config" %}</span>
+                    </button>
+                    <button type="button"
+                            @click="switchTab('html')"
+                            :class="activeTab === 'html' ? 'bg-slate-800 text-emerald-400 font-semibold shadow-xs' : 'text-slate-400 hover:text-slate-200'"
+                            class="cursor-pointer inline-flex items-center gap-1 px-2 py-0.5 text-[10px] rounded transition">
+                        <span class="material-symbols-outlined text-[12px]">analytics</span>
+                        <span>{% trans "HTML" %}</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Toolbar Actions (Copy / Popout / Height Toggle) -->
+            <div class="flex items-center gap-1.5 ml-auto">
+                <!-- Copy Content Button -->
+                <button type="button"
+                        @click="copyContent()"
+                        :class="copied ? 'text-emerald-400 bg-emerald-950/60 border-emerald-800' : 'text-slate-300 hover:text-white bg-slate-800/80 hover:bg-slate-800 border-slate-700'"
+                        class="cursor-pointer inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium rounded border transition"
+                        title="{% trans 'Copy content to clipboard' %}">
+                    <span class="material-symbols-outlined text-[12px]" x-text="copied ? 'check' : 'content_copy'"></span>
+                    <span x-text="copied ? '{% trans "Copied!" %}' : '{% trans "Copy" %}'"></span>
+                </button>
+
+                <!-- Standalone Popout Link -->
+                <template x-if="canvasUrl">
+                    <a :href="canvasUrl" target="_blank"
+                       class="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium rounded text-primary-400 hover:text-primary-300 bg-slate-800/80 hover:bg-slate-800 border border-slate-700 transition"
+                       title="{% trans 'Open in new tab' %}">
+                        <span class="material-symbols-outlined text-[12px]">open_in_new</span>
+                        <span class="hidden sm:inline">{% trans "Popout" %}</span>
+                    </a>
+                </template>
+
+                <!-- Expand / Collapse Height Toggle -->
+                <button type="button"
+                        @click="expanded = !expanded"
+                        class="cursor-pointer p-1 text-slate-400 hover:text-white transition"
+                        :title="expanded ? '{% trans "Compact view" %}' : '{% trans "Expand view" %}'">
+                    <span class="material-symbols-outlined text-[15px]" x-text="expanded ? 'collapse_content' : 'expand_content'"></span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Canvas Body Viewport -->
+        <div :class="expanded ? 'h-[500px]' : 'h-60 sm:h-72'" class="relative w-full overflow-auto bg-slate-950 transition-all duration-200">
+            <!-- Loading Indicator -->
+            <div x-show="canvasLoading" class="absolute inset-0 z-10 flex flex-col items-center justify-center bg-slate-950/80 backdrop-blur-xs gap-2">
+                <span class="material-symbols-outlined animate-spin text-2xl text-primary-400">progress_activity</span>
+                <span class="text-[11px] text-slate-400 font-mono">{% trans "Loading content..." %}</span>
+            </div>
+
+            <!-- Injected HTML Tearsheet Viewport via AJAX -->
+            <div x-show="activeTab === 'html'"
+                 x-ref="htmlContainer"
+                 data-canvas-html
+                 class="w-full h-full min-h-[240px] sm:min-h-[340px] bg-white text-gray-900 overflow-auto p-4 select-text">
+                <div class="flex items-center justify-center p-8 text-gray-400 text-xs">
+                    {% trans "Loading tearsheet..." %}
+                </div>
+            </div>
+
+            <!-- Monospace Code / Log / Config Viewport -->
+            <div x-show="activeTab !== 'html'" class="w-full h-full overflow-auto">
+                <pre class="p-3 font-mono text-[11px] sm:text-xs leading-relaxed text-slate-200 whitespace-pre-wrap break-all select-text m-0"><code x-text="canvasContent || '{% trans "No content recorded for this run." %}'"></code></pre>
+            </div>
+        </div>
+    </div>
 </div>
 {% else %}
 <div class="flex flex-col items-center justify-center p-8 text-center text-gray-500 dark:text-gray-400">

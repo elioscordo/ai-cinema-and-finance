@@ -172,17 +172,20 @@ UNFOLD = {
         lambda request: static("css/unfold_filer_custom.css"),
         lambda request: static("css/custom.css"),
     ],
+    "SCRIPTS": [
+        lambda request: static("js/admin_argo.js"),
+    ],
     "DASHBOARD_CALLBACK": "scene.models.dashboard_callback",
     "ACCOUNT": {}, # Empty this to prevent duplication at the bottom
     
     "COLORS": {
       "font": {
-            "subtle-light": "var(--color-base-500)",  # text-base-500
-            "subtle-dark": "var(--color-base-400)",  # text-base-400
-            "default-light": "var(--color-base-600)",  # text-base-600
-            "default-dark": "var(--color-base-300)",  # text-base-300
-            "important-light": "var(--color-base-700)",  # text-base-900
-            "important-dark": "var(--color-base-300)",  # text-base-100
+            "subtle-light": "var(--color-base-600)",  # darker subtle gray
+            "subtle-dark": "var(--color-base-400)",
+            "default-light": "var(--color-base-800)",  # significantly darker gray for high-contrast list_display
+            "default-dark": "var(--color-base-200)",
+            "important-light": "var(--color-base-950)",  # highest contrast dark
+            "important-dark": "var(--color-base-100)",
         },
         "base": {
             "50": "oklch(98.5% .002 247.839)",
@@ -475,6 +478,7 @@ TASK_TYPE_SYNC_EXPORT = 'sync_export'
 TASK_TYPE_SYNC_IMPORT = 'sync_import'
 TASK_TYPE_EXEC_FUNC = 'exec_func'
 TASK_EXECUTE_FUNC = TASK_TYPE_EXEC_FUNC
+TASK_TYPE_IB_GATEWAY_RESTART = 'ib_gateway_restart'
 
 
 
@@ -505,6 +509,7 @@ TASK_DELEGATES = {
     TASK_TYPE_SYNC_IMPORT: 'scene.tasks.sync.TaskSyncImport',
     TASK_TYPE_VIDEO_RENDER: 'scene.tasks.render.VideoRender',
     TASK_TYPE_EXEC_FUNC: 'task.tasks.TaskExecuteFunc',
+    TASK_TYPE_IB_GATEWAY_RESTART: 'argo.tasks.TaskVerifyAndRestartIBGateway',
 }
 IMPORT_EXPORT_TMP_STORAGE_CLASS = 'import_export.tmp_storages.MediaStorage'
 TASK_TYPE_CHOICES = (
@@ -528,6 +533,7 @@ TASK_TYPE_CHOICES = (
     (TASK_TYPE_SYNC_IMPORT, _("Sync Import")),
     (TASK_TYPE_GENERATE_SCENE, _("Generate Scene Video")),
     (TASK_TYPE_EXEC_FUNC, _("Execute Function")),
+    (TASK_TYPE_IB_GATEWAY_RESTART, _("Verify & Restart IB Gateway")),
 )
 
 TASK_RETRY_EXCEPTIONS = [
@@ -572,9 +578,6 @@ AGENT_SCHEMAS = {
     SCHEMA_OUTPUT_WITH_MESSAGE: "agent.schemas.OutputWithMessageSchema",
     SCHEMA_CREATE_INSTRUCTIONS: "agent.schemas.CreateInstructionsSchema",
     SCHEMA_STORY_SCENES: "scene.schemas.StoryScenesSchema",
-    SCHEMA_ASSETS: "scene.schemas.AssetsSchema",
-    SCHEMA_SYMBOLS: "argo.schemas.InstrumentsSchema",
-    SCHEMA_INSTANCES: "argo.schemas.StrategyInstancesSchema",
     SCHEMA_TRANSLATION: "scene.schemas.SceneTranslationSchema",
     SCHEMA_OPTIMIZE: "argo.schemas.StrategyInstanceOptimizeSchema",
     SCHEMA_INSTRUMENTS: "argo.schemas.InstrumentsSchema",
@@ -602,4 +605,15 @@ COMMON_TEXT_ACTION_CHOICES =(
 SYSTEM_PRESETS = [
     PRESET_INFO,
     PRESET_INSTRUCTION,
-] 
+]
+
+# --- Argo Trading & Historical Data Settings ---
+HISTORICAL_ROOT = os.path.join(BASE_DIR, 'historical_data')
+IB_HOST = os.environ.get('IB_HOST', '127.0.0.1')
+IB_PORT = int(os.environ.get('IB_PORT', 4002))
+IB_GATEWAY_CONTAINER = os.environ.get('IB_GATEWAY_CONTAINER', 'ib-gateway')
+DOCKER_SOCKET_PATH = os.environ.get('DOCKER_SOCKET_PATH', '/var/run/docker.sock')
+
+# --- Session & Cookie Isolation (prevents collision across localhost ports) ---
+SESSION_COOKIE_NAME = 'guillermo_sessionid'
+CSRF_COOKIE_NAME = 'guillermo_csrftoken'

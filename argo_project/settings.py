@@ -14,6 +14,8 @@ load_dotenv(dotenv_path=os.path.join(PROJECT_DIR, '.env'))
 
 IB_HOST = os.getenv("IB_HOST", os.getenv("IB_EXAMPLE_HOST", "127.0.0.1"))
 IB_PORT = int(os.getenv("IB_PORT", os.getenv("IB_EXAMPLE_PORT", "4002")))
+IB_CLIENT_ID = int(os.getenv("IB_CLIENT_ID", "1"))
+IB_TIMEOUT = int(os.getenv("IB_TIMEOUT", "10"))
 
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "your-django-secret")
 DEBUG = True
@@ -88,54 +90,7 @@ UNFOLD = {
         "show_user": True,
         "navigation": [
             {
-                "title": _("Trading & Portfolios"),
-                "separator": False,
-                "items": [
-                    {
-                        "title": _("Portfolios"),
-                        "icon": "pie_chart",
-                        "link": reverse_lazy("admin:argo_portfolio_changelist"),
-                    },
-                    {
-                        "title": _("Strategy Instances"),
-                        "icon": "candlestick_chart",
-                        "link": reverse_lazy("admin:argo_strategyinstance_changelist"),
-                    },
-                    {
-                        "title": _("Positions"),
-                        "icon": "trending_up",
-                        "link": reverse_lazy("admin:argo_position_changelist"),
-                    },
-                    {
-                        "title": _("Broker Accounts"),
-                        "icon": "account_balance",
-                        "link": reverse_lazy("admin:argo_account_changelist"),
-                    },
-                ],
-            },
-            {
                 "title": _("Research & Simulation"),
-                "separator": True,
-                "items": [
-                    {
-                        "title": _("Backtests & Optimizations"),
-                        "icon": "science",
-                        "link": reverse_lazy("admin:argo_backtest_changelist"),
-                    },
-                    {
-                        "title": _("Backtest Runs"),
-                        "icon": "history",
-                        "link": reverse_lazy("admin:argo_backtestrun_changelist"),
-                    },
-                    {
-                        "title": _("Strategies"),
-                        "icon": "psychology",
-                        "link": reverse_lazy("admin:argo_strategy_changelist"),
-                    },
-                ],
-            },
-            {
-                "title": _("Market Universe"),
                 "separator": True,
                 "items": [
                     {
@@ -149,30 +104,48 @@ UNFOLD = {
                         "link": reverse_lazy("admin:argo_instrumentgroup_changelist"),
                     },
                     {
-                        "title": _("IB Contracts"),
-                        "icon": "receipt_long",
-                        "link": reverse_lazy("admin:argo_ibcontract_changelist"),
+                        "title": _("Strategies"),
+                        "icon": "psychology",
+                        "link": reverse_lazy("admin:argo_strategy_changelist"),
                     },
+                    {
+                        "title": _("Strategy Instances"),
+                        "icon": "candlestick_chart",
+                        "link": reverse_lazy("admin:argo_strategyinstance_changelist"),
+                    },
+                    
+                    {
+                        "title": _("Backtests"),
+                        "icon": "science",
+                        "link": reverse_lazy("admin:argo_backtest_changelist"),
+                    },
+                    {
+                        "title": _("Backtest Runs"),
+                        "icon": "history",
+                        "link": reverse_lazy("admin:argo_backtestrun_changelist"),
+                    },
+                    
                 ],
             },
             {
-                "title": _("Alpha & Signals"),
-                "separator": True,
+                "title": _("Live Trading"),
+                "separator": False,
                 "items": [
                     {
-                        "title": _("Scanners"),
-                        "icon": "radar",
-                        "link": reverse_lazy("admin:argo_scanner_changelist"),
+                        "title": _("Portfolios"),
+                        "icon": "pie_chart",
+                        "link": reverse_lazy("admin:argo_portfolio_changelist"),
+                    },
+
+                    {
+                        "title": _("Positions"),
+                        "icon": "trending_up",
+                        "link": reverse_lazy("admin:argo_position_changelist"),
                     },
                     {
-                        "title": _("Signals"),
-                        "icon": "bolt",
-                        "link": reverse_lazy("admin:argo_signal_changelist"),
-                    },
-                    {
-                        "title": _("Recommendations"),
-                        "icon": "tips_and_updates",
-                        "link": reverse_lazy("admin:argo_recommendation_changelist"),
+                        "title": _("Broker Accounts"),
+                        "icon": "account_balance",
+                        "link": reverse_lazy("admin:argo_account_changelist"),
                     },
                 ],
             },
@@ -251,7 +224,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 HISTORICAL_ROOT = os.getenv("HISTORICAL_ROOT", os.path.join(BASE_DIR, "historical_data"))
 
 # Celery Configuration
-CELERY_BROKER_TYPE = os.getenv("CELERY_BROKER_TYPE", "sqlite")
+CELERY_BROKER_TYPE = os.getenv("CELERY_BROKER_TYPE", "redis")
 if CELERY_BROKER_TYPE == "sqlite":
     CELERY_BROKER_URL = f"sqla+sqlite:///{BASE_DIR / 'argo_celerydb.sqlite'}"
 else:
@@ -299,8 +272,6 @@ AGENT_SCHEMAS = {
     SCHEMA_OUTPUT_WITH_MESSAGE: "agent.schemas.OutputWithMessageSchema",
     SCHEMA_CREATE_INSTRUCTIONS: "agent.schemas.CreateInstructionsSchema",
     SCHEMA_INSTRUMENTS: "argo.schemas.InstrumentsSchema",
-    SCHEMA_INSTANCES: "argo.schemas.StrategyInstancesSchema",
-    SCHEMA_OPTIMIZE: "argo.schemas.StrategyInstanceOptimizeSchema",
 }
 
 

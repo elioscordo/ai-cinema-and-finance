@@ -4,7 +4,6 @@ from nautilus_trader.model.instruments import Instrument as NautilusInstrument
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 from argo.models import Instrument, InstrumentGroup
-from .factories import IBContractAdapter, NautilusInstrumentFactory
 
 
 class DjangoInstrumentProvider:
@@ -22,10 +21,7 @@ class DjangoInstrumentProvider:
     @classmethod
     def get_ib_contracts(cls, queryset: Optional[Iterable[Instrument]] = None) -> List[NautilusIBContract]:
         """Loads and converts Django instruments into Nautilus IBContract configurations."""
-        qs = queryset if queryset is not None else Instrument.objects.filter(is_active=True)
-        qs = qs.select_related("ib_contract")
-        return [IBContractAdapter.to_nautilus_ib_contract(inst) for inst in qs]
-
+        return None
     @classmethod
     def get_ib_contracts_set(cls, queryset: Optional[Iterable[Instrument]] = None) -> frozenset:
         """Returns frozenset of IBContracts ready for InteractiveBrokersInstrumentProviderConfig."""

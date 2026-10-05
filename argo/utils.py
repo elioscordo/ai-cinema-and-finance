@@ -1,11 +1,111 @@
+import datetime
 import importlib
 import inspect
+import json
 import pkgutil
+from pathlib import Path
 from django.apps import apps
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.data import BarType
 from nautilus_trader.trading.config import StrategyConfig
 from nautilus_trader.trading.strategy import Strategy as NautilusStrategy
+
+
+def _empty_intervals_path(root: str, identifier: str) -> Path:
+    safe_id = identifier.replace("/", "_")
+    return Path(root) / "data" / "bar" / safe_id / "empty_intervals.json"
+
+
+def load_empty_intervals(root: str, identifier: str) -> list[tuple[datetime.datetime, datetime.datetime]]:
+    """Loads verified empty intervals from catalog JSON."""
+    path = _empty_intervals_path(root, identifier)
+    if not path.exists():
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        return [
+            (datetime.datetime.fromisoformat(s).replace(tzinfo=None),
+             datetime.datetime.fromisoformat(e).replace(tzinfo=None))
+            for s, e in raw
+        ]
+    except Exception:
+        return []
+
+
+def _to_naive_utc(dt: datetime.datetime) -> datetime.datetime:
+    """Normalizes any datetime or pandas.Timestamp to a timezone-naive UTC datetime."""
+    if dt is None:
+        return dt
+    if getattr(dt, "tzinfo", None) is not None:
+        if hasattr(dt, "tz_convert"):
+            return dt.tz_convert("UTC").tz_localize(None).to_pydatetime()
+        return dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+    if hasattr(dt, "to_pydatetime"):
+        return dt.to_pydatetime()
+    return dt
+
+
+def record_empty_interval(root: str, identifier: str, start: datetime.datetime, end: datetime.datetime) -> None:
+    """Appends and merges a verified empty interval into catalog JSON."""
+    path = _empty_intervals_path(root, identifier)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    intervals = load_empty_intervals(root, identifier)
+    intervals.append((_to_naive_utc(start), _to_naive_utc(end)))
+
+    intervals.sort(key=lambda x: x[0])
+    merged = [intervals[0]]
+    for s, e in intervals[1:]:
+        if s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump([[s.isoformat(), e.isoformat()] for s, e in merged], f, indent=2)
+
+
+def is_interval_empty(
+    start: datetime.datetime,
+    end: datetime.datetime,
+    empty_intervals: list[tuple[datetime.datetime, datetime.datetime]],
+) -> bool:
+    """Returns True if [start, end] is covered by verified empty intervals."""
+    s = _to_naive_utc(start)
+    e = _to_naive_utc(end)
+    tol = datetime.timedelta(seconds=60)
+    for es, ee in empty_intervals:
+        es_n = _to_naive_utc(es)
+        ee_n = _to_naive_utc(ee)
+        if (es_n - tol) <= s and e <= (ee_n + tol):
+            return True
+    return False
+
+
+def is_market_closure_gap(
+    start_dt: datetime.datetime,
+    end_dt: datetime.datetime,
+    max_days: int = 4,
+) -> bool:
+    """Checks if an interval corresponds to an expected weekend or market holiday closure."""
+    start_dt = _to_naive_utc(start_dt)
+    end_dt = _to_naive_utc(end_dt)
+
+    duration = end_dt - start_dt
+    if duration.total_seconds() <= 0 or duration.days > max_days:
+        return False
+
+    s_day = start_dt.weekday()
+    e_day = end_dt.weekday()
+
+    # Starts Friday evening (>= 20:00 UTC) or during the weekend
+    starts_after_close = (s_day == 4 and start_dt.hour >= 20) or s_day in (5, 6)
+    # Ends before/around market open on Monday/Tuesday (<= 15:00 UTC) or during the weekend
+    ends_before_open = (e_day in (0, 1) and end_dt.hour <= 15) or e_day in (5, 6)
+
+    return starts_after_close and ends_before_open
+
+
 
 
 def resolve_strategy_classes(class_path: str):
