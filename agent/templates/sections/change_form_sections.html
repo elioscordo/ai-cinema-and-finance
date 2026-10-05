@@ -2,7 +2,9 @@
 {% if original and original.pk and adminform.model_admin.changeform_sections %}
     <div class="mt-6 flex flex-col gap-6">
         {% for section in adminform.model_admin.changeform_sections %}
-            {% render_section section original %}
+            {% if section %}
+                {% render_section section original %}
+            {% endif %}
         {% endfor %}
     </div>
 {% endif %}

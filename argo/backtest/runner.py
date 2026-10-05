@@ -69,17 +69,11 @@ class StrategyBacktestRunner:
 
         temp_log_dir = tempfile.mkdtemp(prefix="nautilus_run_log_")
 
-        # Set up Python log capture covering entire run
+        # Set up Python log capture covering entire run attached strictly to root logger
         log_capture = _LogCaptureHandler()
         log_capture.setLevel(logging.DEBUG)
-        watched_loggers = [
-            logging.getLogger(),
-            logging.getLogger("argo"),
-            logging.getLogger("argo.backtest"),
-            logging.getLogger("nautilus_trader"),
-        ]
-        for l in watched_loggers:
-            l.addHandler(log_capture)
+        root_logger = logging.getLogger()
+        root_logger.addHandler(log_capture)
 
         stdout_buf = io.StringIO()
 
@@ -95,19 +89,32 @@ class StrategyBacktestRunner:
             primary_venue = Venue(instance.instrument.venue or "SMART")
             self._add_venue(engine, primary_venue, currency_str, registered_venues)
 
+            merged_params = {**(instance.params or {}), **(params_override or {})}
+
             # Register all instruments associated with this instance and their respective venues
-            all_instruments = instance.get_instruments() or [instance.instrument]
+            all_instruments = self._resolve_participating_instruments(instance, merged_params)
             for instr in all_instruments:
                 n_instr = NautilusInstrumentFactory.create(instr)
                 self._add_venue(engine, n_instr.id.venue, currency_str, registered_venues)
                 engine.add_instrument(n_instr)
 
-            # Load & feed historical bars ensuring AggregationSource.EXTERNAL
-            bars = self._load_simulation_bars(instance, instrument.id, bar_type, start, end)
-            engine.add_data(bars)
+            # Load & feed historical bars for all participating instruments ensuring AggregationSource.EXTERNAL
+            primary_bars = []
+            total_bars_count = 0
+            for instr in all_instruments:
+                n_instr = NautilusInstrumentFactory.create(instr)
+                instr_bar_type = self._resolve_bar_type(merged_params.get("bar_type"), n_instr.id)
+                instr_bars = self._load_simulation_bars(instr, n_instr.id, instr_bar_type, start, end)
+                if instr_bars:
+                    engine.add_data(instr_bars)
+                    total_bars_count += len(instr_bars)
+                    if instr.id == instance.instrument.id:
+                        primary_bars = instr_bars
+
+            if not primary_bars and total_bars_count > 0:
+                primary_bars = instr_bars
 
             # Instantiate strategy via StrategyInstance model (zero parameter assumptions)
-            merged_params = {**(instance.params or {}), **(params_override or {})}
             strategy = instance.instantiate_strategy(params_override=merged_params, bar_type=bar_type)
             engine.add_strategy(strategy)
 
@@ -116,7 +123,7 @@ class StrategyBacktestRunner:
                 engine.run()
 
             # Compile performance result
-            result = self._compile_result(engine, instance, instrument, start, end, merged_params, bars)
+            result = self._compile_result(engine, instance, instrument, start, end, merged_params, primary_bars, total_bars_count)
 
             if save_run:
                 # Harvest file logs from Nautilus
@@ -137,7 +144,7 @@ class StrategyBacktestRunner:
                     instrument=instrument,
                     start=start,
                     end=end,
-                    bars_count=len(bars),
+                    bars_count=total_bars_count,
                     engine=engine,
                     result=result,
                     python_log=log_capture.getvalue(),
@@ -165,8 +172,7 @@ class StrategyBacktestRunner:
 
             return result
         finally:
-            for l in watched_loggers:
-                l.removeHandler(log_capture)
+            root_logger.removeHandler(log_capture)
             if os.path.exists(temp_log_dir):
                 shutil.rmtree(temp_log_dir, ignore_errors=True)
 
@@ -179,17 +185,47 @@ class StrategyBacktestRunner:
             spec_str = f"{spec_str}-EXTERNAL"
         return BarType.from_str(spec_str)
 
-    def _load_simulation_bars(self, instance, instrument_id, bar_type: BarType, start: datetime.datetime, end: datetime.datetime) -> list:
+    def _resolve_participating_instruments(self, instance, merged_params: Optional[dict] = None) -> list:
+        """Resolves all participating instruments from instance relations and parameters."""
+        instruments = instance.get_instruments() or ([instance.instrument] if instance.instrument else [])
+        from argo.models import Instrument
+        instruments_dict = {i.id: i for i in instruments if i}
+
+        # Inspect parameter values generically for any referenced instruments
+        for val in (merged_params or {}).values():
+            items = [val] if isinstance(val, str) else (val if isinstance(val, (list, tuple)) else [])
+            for item in items:
+                if isinstance(item, str) and ("." in item or "/" in item):
+                    symbol = item.split(".")[0].split("/")[0].strip()
+                    matched = Instrument.objects.filter(symbol=symbol).first()
+                    if matched and matched.id not in instruments_dict:
+                        instruments_dict[matched.id] = matched
+
+        return list(instruments_dict.values())
+
+    def _load_simulation_bars(self, instrument_model, instrument_id, bar_type: BarType, start: datetime.datetime, end: datetime.datetime) -> list:
         """Loads bars from configured catalog or instrument directory, ensuring EXTERNAL source."""
+        bars = None
         if self.data_loader:
-            loader = self.data_loader
+            bars = self.data_loader.load_bars(instrument_id, bar_type, start, end)
         else:
             from argo.models import HistoricalData
-            instr_catalog = str(HistoricalData(instrument=instance.instrument).get_instrument_dir())
-            loader = BacktestDataLoader(catalog_path=instr_catalog)
+            from django.conf import settings
 
-        bars = loader.load_bars(instrument_id, bar_type, start, end)
-        normalized = self._ensure_external_bars(bars, bar_type)
+            if instrument_model is not None:
+                try:
+                    instr_catalog = str(HistoricalData(instrument=instrument_model).get_instrument_dir())
+                    loader = BacktestDataLoader(catalog_path=instr_catalog)
+                    bars = loader.load_bars(instrument_id, bar_type, start, end)
+                except Exception:
+                    bars = None
+
+            if not bars:
+                root_catalog = getattr(settings, "HISTORICAL_ROOT", None) or os.path.join(getattr(settings, "BASE_DIR", "."), "historical_data")
+                root_loader = BacktestDataLoader(catalog_path=str(root_catalog))
+                bars = root_loader.load_bars(instrument_id, bar_type, start, end)
+
+        normalized = self._ensure_external_bars(bars or [], bar_type)
         if normalized:
             dt_start = datetime.datetime.fromtimestamp(normalized[0].ts_event / 1e9, tz=datetime.timezone.utc)
             dt_end = datetime.datetime.fromtimestamp(normalized[-1].ts_event / 1e9, tz=datetime.timezone.utc)
@@ -230,15 +266,20 @@ class StrategyBacktestRunner:
         return resolve_strategy_classes(class_path)
 
     def _build_engine(self, venue: Optional[Venue] = None, currency_code: str = "USD", log_dir: Optional[str] = None) -> BacktestEngine:
-        logging_kwargs = {"log_level": self.log_level}
+        logging_kwargs = {
+            "log_level": self.log_level,
+            "log_colors": False,
+        }
         if log_dir:
             sig = inspect.signature(LoggingConfig)
-            if "log_to_file" in sig.parameters:
-                logging_kwargs["log_to_file"] = True
+            if "log_level_file" in sig.parameters:
+                logging_kwargs["log_level_file"] = self.log_level
             if "log_directory" in sig.parameters:
                 logging_kwargs["log_directory"] = str(log_dir)
             elif "directory" in sig.parameters:
                 logging_kwargs["directory"] = str(log_dir)
+            if "log_file_name" in sig.parameters:
+                logging_kwargs["log_file_name"] = "nautilus.log"
 
         config = BacktestEngineConfig(
             trader_id=TraderId("BACKTEST-TRADER"),
@@ -309,7 +350,17 @@ class StrategyBacktestRunner:
         except (ValueError, TypeError):
             return 0.0
 
-    def _compile_result(self, engine: BacktestEngine, instance, instrument, start, end, params, bars) -> BacktestResult:
+    def _compile_result(
+        self,
+        engine: BacktestEngine,
+        instance,
+        instrument,
+        start,
+        end,
+        params,
+        bars,
+        total_bars_count: Optional[int] = None,
+    ) -> BacktestResult:
         orders = engine.trader.generate_orders_report()
         fills = engine.trader.generate_order_fills_report()
         positions = engine.trader.generate_positions_report()
@@ -330,8 +381,9 @@ class StrategyBacktestRunner:
             gross_loss = abs(float(pnl_col[pnl_col < 0].sum()))
             profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else (2.0 if winning_trades > 0 else 1.0)
 
+        display_bars = total_bars_count if total_bars_count is not None else len(bars)
         logger.info(
-            f"[EXECUTION REPORT] Simulation completed: {len(bars):,} bars | Orders: {orders_count} | "
+            f"[EXECUTION REPORT] Simulation completed: {display_bars:,} bars | Orders: {orders_count} | "
             f"Fills: {fills_count} | Closed positions: {total_trades} | Net PnL: ${total_pnl:,.2f}"
         )
 
@@ -344,7 +396,7 @@ class StrategyBacktestRunner:
         elif orders_count == 0:
             logger.info(
                 "[EXECUTION DIAGNOSTIC] 0 orders submitted by strategy. "
-                "Check filter constraints (min_adx, max_vol_pct, max_long_rsi) or trend flip triggers."
+                "Check entry conditions, filter constraints, or indicator thresholds."
             )
 
         final_equity = self.starting_balance + total_pnl

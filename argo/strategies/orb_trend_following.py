@@ -9,6 +9,7 @@ Multi-instrument trend-following system:
 """
 
 import datetime
+import logging
 from typing import Dict, List, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
 
@@ -20,6 +21,8 @@ from nautilus_trader.trading.config import StrategyConfig
 from nautilus_trader.trading.strategy import Strategy as NautilusStrategy
 
 from argo.strategies.orb_indicator import OpeningRangeBreakoutIndicator
+
+logger = logging.getLogger("argo.strategy.ORBTrendFollowingStrategy")
 
 
 class ORBTrendFollowingConfig(StrategyConfig, frozen=True):
@@ -90,11 +93,17 @@ class ORBTrendFollowingStrategy(NautilusStrategy):
             market_tz=self.config.market_tz,
         )
 
+    def _log_msg(self, level: str, msg: str) -> None:
+        """Dual-logs to NautilusTrader native logger and Python standard logger."""
+        getattr(self.log, level, self.log.info)(msg)
+        logger.log(getattr(logging, level.upper(), logging.INFO), msg)
+
     def on_start(self):
         super().on_start()
-        self.log.info(
+        self._log_msg(
+            "info",
             f"Starting {self.__class__.__name__} with SP={self.sp_id}, ETF={self.etf_id}, "
-            f"{len(self.underlying_ids)} underlyings, ORB={self.config.orb_minutes}m"
+            f"{len(self.underlying_ids)} underlyings, ORB={self.config.orb_minutes}m",
         )
         for instr_id in self.all_instrument_ids:
             bar_type = self._resolve_bar_type(instr_id)
@@ -143,6 +152,7 @@ class ORBTrendFollowingStrategy(NautilusStrategy):
         self.current_session_date = new_date
         self.entered_today = False
         self.active_positions.clear()
+        self._log_msg("info", f"[ORB Session Reset] Date: {new_date}. Active positions cleared.")
 
     def _check_and_execute_breakout(self) -> None:
         if not (self.sp_orb.is_breakout_high and self.etf_orb.is_breakout_high):
@@ -159,6 +169,12 @@ class ORBTrendFollowingStrategy(NautilusStrategy):
         candidates.sort(key=lambda item: item[1], reverse=True)
         top_winners = candidates[:self.config.top_k]
 
+        self._log_msg(
+            "info",
+            f"[ORB Breakout Triggered] Macro breakout confirmed: SP={self.sp_id}, ETF={self.etf_id}. "
+            f"Executing top {len(top_winners)} winner(s).",
+        )
+
         for winner_id, ret in top_winners:
             self._open_long_position(winner_id, ret)
 
@@ -170,16 +186,34 @@ class ORBTrendFollowingStrategy(NautilusStrategy):
         order = self.order_factory.market(instrument_id, OrderSide.BUY, qty, TimeInForce.GTC)
         self.submit_order(order)
         self.active_positions[instrument_id] = qty
-        self.log.info(
-            f"[ORB Entry] Macro & Sector Breakout! Buying top winner {instrument_id} (Return: {score:.2%}, Qty: {qty})"
+        self._log_msg(
+            "info",
+            f"[ORB Entry] Macro & Sector Breakout! Buying top winner {instrument_id} (Return: {score:.2%}, Qty: {qty})",
         )
 
     def _close_all_positions(self) -> None:
         for instrument_id, qty in list(self.active_positions.items()):
             order = self.order_factory.market(instrument_id, OrderSide.SELL, qty, TimeInForce.GTC)
             self.submit_order(order)
-            self.log.info(f"[ORB Session Close] Closing position {instrument_id} (Qty: {qty})")
+            self._log_msg("info", f"[ORB Session Close] Closing position {instrument_id} (Qty: {qty})")
         self.active_positions.clear()
 
+    def on_order_submitted(self, event) -> None:
+        self._log_msg("info", f"[ORB Order Submitted] client_order_id={getattr(event, 'client_order_id', event)}")
+
+    def on_order_filled(self, event) -> None:
+        self._log_msg(
+            "info",
+            f"[ORB Order Filled] client_order_id={getattr(event, 'client_order_id', 'N/A')}, "
+            f"qty={getattr(event, 'last_qty', 'N/A')}, px={getattr(event, 'last_px', 'N/A')}",
+        )
+
+    def on_order_rejected(self, event) -> None:
+        self._log_msg("warning", f"[ORB Order Rejected] {event}")
+
+    def on_order_canceled(self, event) -> None:
+        self._log_msg("info", f"[ORB Order Canceled] {event}")
+
     def on_stop(self):
-        self.log.info(f"Stopping {self.__class__.__name__}")
+        super().on_stop()
+        self._log_msg("info", f"Stopping {self.__class__.__name__}. Completed simulation.")

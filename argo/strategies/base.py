@@ -27,9 +27,16 @@ class ArgoBaseStrategy(NautilusStrategy):
         )
         self.instrument: Optional[Instrument] = None
 
+    def _log_msg(self, level: str, msg: str) -> None:
+        getattr(self.log, level, self.log.info)(msg)
+        import logging
+        logging.getLogger(f"argo.strategy.{self.__class__.__name__}").log(
+            getattr(logging, level.upper(), logging.INFO), msg
+        )
+
     def on_start(self):
         self.instrument = self.cache.instrument(self.instrument_id)
-        self.log.info(f"Starting {self.__class__.__name__} for {self.instrument_id}")
+        self._log_msg("info", f"Starting {self.__class__.__name__} for {self.instrument_id}")
         self.subscribe_bars(self._bar_type)
 
     def make_qty(self, trade_size: float) -> Quantity:
@@ -41,19 +48,26 @@ class ArgoBaseStrategy(NautilusStrategy):
         return bar.bar_type == self._bar_type or bar.instrument_id == self.instrument_id
 
     def on_order_submitted(self, event) -> None:
-        self.log.info(f"[{self.instrument_id}] ORDER SUBMITTED: client_order_id={getattr(event, 'client_order_id', event)}")
+        self._log_msg("info", f"[{self.instrument_id}] ORDER SUBMITTED: client_order_id={getattr(event, 'client_order_id', event)}")
 
     def on_order_filled(self, event) -> None:
-        self.log.info(
+        self._log_msg(
+            "info",
             f"[{self.instrument_id}] ORDER FILLED: client_order_id={getattr(event, 'client_order_id', 'N/A')}, "
             f"qty={getattr(event, 'last_qty', 'N/A')}, px={getattr(event, 'last_px', 'N/A')}"
         )
 
     def on_order_rejected(self, event) -> None:
-        self.log.error(
+        self._log_msg(
+            "error",
             f"[{self.instrument_id}] ORDER REJECTED: client_order_id={getattr(event, 'client_order_id', 'N/A')}, "
             f"reason={getattr(event, 'reason', 'N/A')}"
         )
 
     def on_order_canceled(self, event) -> None:
-        self.log.warning(f"[{self.instrument_id}] ORDER CANCELED: client_order_id={getattr(event, 'client_order_id', 'N/A')}")
+        self._log_msg("warning", f"[{self.instrument_id}] ORDER CANCELED: client_order_id={getattr(event, 'client_order_id', 'N/A')}")
+
+    def on_stop(self):
+        super().on_stop()
+        self._log_msg("info", f"Stopping {self.__class__.__name__} for {self.instrument_id}")
+

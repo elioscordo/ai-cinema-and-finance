@@ -50,7 +50,7 @@ class TaskRunBacktest:
             f"- Max DD: {result.max_drawdown_pct:.2%} | Win Rate: {result.win_rate:.1%} ({result.total_trades} trades)"
         )
         if result.total_trades == 0:
-            summary_msg += "\n[DIAGNOSTIC] 0 trades executed. Review strategy filter parameters (min_adx, min_vol_pct) or instrument volatility."
+            summary_msg += "\n[DIAGNOSTIC] 0 trades executed. Review strategy entry rules, parameters, or market data."
         self.task.log(summary_msg)
 
 

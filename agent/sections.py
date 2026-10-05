@@ -9,11 +9,18 @@ from django.contrib.contenttypes.models import ContentType
 from .utils import handle_ajax_field_save
 from django.apps import apps
 from django.forms import modelform_factory
+from django.utils.module_loading import import_string
 from unfold.widgets import SELECT_CLASSES, Select, UnfoldAdminSelectWidget, UnfoldAdminTextareaWidget
-from unfold.sections import TemplateSection
+from unfold.sections import BaseSection, TemplateSection, TableSection
 from django.utils.safestring import mark_safe
 from .widgets import DynamicMarkdownWidget as MarkdownWidget, CodeWidget
 from django.db import models as db_models
+
+# Prevent Django template engine from calling section classes when evaluating variables
+BaseSection.do_not_call_in_templates = True
+TemplateSection.do_not_call_in_templates = True
+TableSection.do_not_call_in_templates = True
+
 
 class AjaxSectionAdminMixin:
     change_form_outer_after_template = "sections/change_form_sections.html"
@@ -21,7 +28,16 @@ class AjaxSectionAdminMixin:
     @property
     def media(self):
         media = super().media + forms.Media(js=['js/admin_ajax.js'])
-        sections = list(getattr(self, "list_sections", [])) + list(getattr(self, "changeform_sections", []))
+        raw_sections = list(getattr(self, "list_sections", [])) + list(getattr(self, "changeform_sections", []))
+        sections = []
+        for sec in raw_sections:
+            if isinstance(sec, str):
+                try:
+                    sec = import_string(sec)
+                except Exception:
+                    continue
+            sections.append(sec)
+
         has_markdown = False
         has_code = False
         for sec in sections:
@@ -58,9 +74,14 @@ class AjaxSectionAdminMixin:
         ]
         
         # Discover and add URLs from sections
-        sections = list(getattr(self, "list_sections", [])) + list(getattr(self, "changeform_sections", []))
+        raw_sections = list(getattr(self, "list_sections", [])) + list(getattr(self, "changeform_sections", []))
         seen_keys = set()
-        for section_class in sections:
+        for section_class in raw_sections:
+            if isinstance(section_class, str):
+                try:
+                    section_class = import_string(section_class)
+                except Exception:
+                    continue
             key = getattr(section_class, "key", getattr(section_class, "__name__", str(section_class)))
             if key in seen_keys:
                 continue
@@ -113,6 +134,7 @@ class AjaxSectionAdminMixin:
         
 class AjaxSection(TemplateSection):
     """Base class for sections that need to handle their own AJAX URLs."""
+    do_not_call_in_templates = True
 
     @classmethod
     def get_section_urls(cls, model_admin):

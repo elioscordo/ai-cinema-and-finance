@@ -26,7 +26,7 @@ from .models import (
     Instrument,
     IBContract,
 )
-from .sections import StrategyCodeSection
+from .sections import StrategyCodeSection, BacktestRunSection, RunSection
 from .utils import load_strategies_from_package
 
 
@@ -165,7 +165,8 @@ class BacktestAdmin(ModelActionsAdminMixin, SimpleHistoryAdmin, AjaxSectionAdmin
     list_filter = ('optimization_objective', 'strategy_instance__strategy_model')
     search_fields = ('name', 'strategy_instance__instruments__symbol', 'strategy_instance__strategy_model__name')
     autocomplete_fields = ('strategy_instance',)
-    list_sections = [MessageHistorySection]
+    list_sections = [MessageHistorySection, BacktestRunSection]
+    changeform_sections = [BacktestRunSection]
     inlines = [BacktestRunInline]
     actions = ['apply_best_params_action']
 
@@ -203,6 +204,23 @@ class BacktestRunAdmin(AjaxSectionAdminMixin, ModelAdmin):
         'profit_factor',
         'win_rate',
         'total_trades',
+    )
+    fieldsets = (
+        (_("Run Information"), {
+            "fields": ("strategy_instance", "backtest", "created_at", "total_pnl", "return_pct", "sharpe_ratio", "sortino_ratio", "calmar_ratio", "max_drawdown_pct", "profit_factor", "win_rate", "total_trades"),
+        }),
+        (_("Interactive Report"), {
+            "fields": ("display_html_report",),
+        }),
+        (_("Execution Log"), {
+            "fields": ("display_log",),
+        }),
+        (_("Executed Strategy Code"), {
+            "fields": ("display_code",),
+        }),
+        (_("Final Configuration"), {
+            "fields": ("display_config",),
+        }),
     )
     autocomplete_fields = ('backtest', 'strategy_instance')
 
