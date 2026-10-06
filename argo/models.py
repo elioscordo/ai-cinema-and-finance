@@ -514,6 +514,69 @@ class StrategyInstance(CloneModelMixin, AfterSaveActionMixin, models.Model, GetC
             )
         return super().task_from_action(action_type, user=user, message=message)
 
+    def _inject_instrument_params(
+        self,
+        merged_params: dict[str, Any],
+        valid_params: set[str],
+        has_var_kwargs: bool,
+        type_hints: dict[str, Any],
+    ) -> None:
+        """
+        Injects configured StrategyInstruments directly into strategy parameters.
+        Each StrategyInstrument maps an Instrument model instance (or tuple of instances
+        for multi-instrument configurations) to its explicitly configured strategy parameter key.
+        Parameters correspond strictly to configured keys with no implicit fallback guessing.
+        """
+        for key, val in self.get_instruments_as_params().items():
+            if key in valid_params or has_var_kwargs:
+                expected = str(type_hints.get(key, "")).lower()
+                target_val = merged_params.get(key, val)
+                if "instrument" in expected and not ("str" in expected or "instrumentid" in expected or "id" in key):
+                    merged_params[key] = target_val
+                elif isinstance(target_val, (list, tuple)):
+                    ids = [getattr(i, "instrument_id_str", str(i)) for i in target_val]
+                    merged_params[key] = tuple(ids) if "tuple" in expected else ids
+                else:
+                    merged_params[key] = getattr(target_val, "instrument_id_str", str(target_val))
+
+    def _inject_bar_type_param(
+        self,
+        merged_params: dict[str, Any],
+        valid_params: set[str],
+        type_hints: dict[str, Any],
+        bar_type: str | None,
+    ) -> None:
+        """
+        Injects bar_type parameter formatted according to the strategy's specification.
+        Resolves the configured timeframe and formats as a native BarType object or fully qualified
+        canonical Nautilus BarType string (e.g. 'AAPL.SMART-5-MINUTE-LAST-EXTERNAL') so standard
+        Nautilus strategies parse it without error.
+        """
+        if "bar_type" in valid_params:
+            si = self.strategy_instruments.first()
+            raw_bar = (
+                merged_params.get("bar_type")
+                or bar_type
+                or (si.bar_type if si and si.bar_type else None)
+                or self.bar_type
+            )
+            if raw_bar is not None:
+                primary = self.instrument
+                full_bar_str = (
+                    primary.get_nautilus_bar_type(str(raw_bar))
+                    if primary is not None
+                    else str(raw_bar)
+                )
+                expected_type = str(type_hints.get("bar_type", ""))
+                if "BarType" in expected_type:
+                    from nautilus_trader.model.data import BarType as NautilusBarType
+                    if isinstance(raw_bar, NautilusBarType):
+                        merged_params["bar_type"] = raw_bar
+                    else:
+                        merged_params["bar_type"] = NautilusBarType.from_str(full_bar_str)
+                else:
+                    merged_params["bar_type"] = full_bar_str
+
     def instantiate_strategy(
         self,
         params_override: dict | None = None,
@@ -521,8 +584,17 @@ class StrategyInstance(CloneModelMixin, AfterSaveActionMixin, models.Model, GetC
     ):
         """
         Instantiates and returns the NautilusStrategy for this StrategyInstance.
-        Injects configured StrategyInstruments with their respective keys into the configuration.
-        Throws an exception if the strategy or configuration cannot be instantiated.
+
+        Target parameters receive actual Django Instrument model instances (or tuples
+        thereof for multi-instrument keys) rather than string identifiers, allowing strategies
+        to access complete contract metadata.
+
+        Args:
+            params_override: Optional parameter dictionary overriding instance defaults.
+            bar_type: Optional fallback bar type string.
+
+        Returns:
+            The instantiated NautilusStrategy instance.
         """
         if not self.strategy_model or not self.strategy_model.class_path:
             raise ValueError(f"StrategyInstance #{self.pk} has no Strategy or class_path configured.")
@@ -533,6 +605,7 @@ class StrategyInstance(CloneModelMixin, AfterSaveActionMixin, models.Model, GetC
         strategy_class, config_class = resolve_strategy_classes(self.strategy_model.class_path)
         target = config_class or strategy_class.__init__
 
+        # Inspect target parameters and type annotations
         sig = inspect.signature(target)
         valid_params = set(sig.parameters.keys())
         if inspect.isclass(target) and hasattr(target, "__dataclass_fields__"):
@@ -541,57 +614,22 @@ class StrategyInstance(CloneModelMixin, AfterSaveActionMixin, models.Model, GetC
         has_var_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
         type_hints = getattr(target, "__annotations__", {})
 
-        # Start with instance params merged with overrides
+        # Merge base instance parameters with overrides
         merged_params = dict(self.params or {})
         if params_override:
             merged_params.update(params_override)
 
-        # Inject StrategyInstruments with their keys ONLY if expected by target
-        key_instruments: dict[str, list[str]] = {}
-        for si in self.strategy_instruments.select_related('instrument'):
-            if si.instrument:
-                key_instruments.setdefault(si.key, []).append(si.instrument.instrument_id_str)
+        # Inject instrument instances and bar type
+        self._inject_instrument_params(merged_params, valid_params, has_var_kwargs, type_hints)
+        self._inject_bar_type_param(merged_params, valid_params, type_hints, bar_type)
 
-        for key, instr_ids in key_instruments.items():
-            if key in valid_params or has_var_kwargs:
-                expected = str(type_hints.get(key, "")).lower()
-                if len(instr_ids) == 1 and not any(t in expected for t in ["list", "tuple", "sequence"]):
-                    merged_params.setdefault(key, instr_ids[0])
-                elif "tuple" in expected:
-                    merged_params.setdefault(key, tuple(instr_ids))
-                else:
-                    merged_params.setdefault(key, instr_ids)
+        # Filter kwargs to strictly accepted parameters
+        filtered_kwargs = {
+            k: v for k, v in merged_params.items()
+            if k not in ("actor_path", "config_path", "config") and (k in valid_params or has_var_kwargs)
+        }
 
-        instruments = self.get_instruments()
-        # Fallback for primary instrument ONLY if target explicitly expects instrument_id
-        if "instrument_id" in valid_params and "instrument_id" not in merged_params and instruments:
-            merged_params["instrument_id"] = instruments[0].instrument_id_str
-
-        # Fallback for plural instrument_ids ONLY if target explicitly expects it
-        if "instrument_ids" in valid_params and "instrument_ids" not in merged_params and instruments:
-            expected = str(type_hints.get("instrument_ids", "")).lower()
-            ids = [i.instrument_id_str for i in instruments]
-            merged_params["instrument_ids"] = tuple(ids) if "tuple" in expected else ids
-
-        # Supply bar_type ONLY if target explicitly expects it
-        if "bar_type" in valid_params:
-            target_bar = merged_params.get("bar_type") or bar_type
-            if target_bar is not None:
-                expected_type = str(type_hints.get("bar_type", ""))
-                if "BarType" in expected_type:
-                    from nautilus_trader.model.data import BarType
-                    merged_params["bar_type"] = target_bar if isinstance(target_bar, BarType) else BarType.from_str(str(target_bar))
-                else:
-                    merged_params["bar_type"] = str(target_bar)
-
-        # Filter kwargs to strictly what target accepts
-        filtered_kwargs = {}
-        for k, v in merged_params.items():
-            if k in ["actor_path", "config_path", "config"]:
-                continue
-            if k in valid_params or has_var_kwargs:
-                filtered_kwargs[k] = v
-
+        # Instantiate configuration object if applicable, then instantiate strategy
         if config_class:
             config = config_class(**filtered_kwargs)
             strat_sig = inspect.signature(strategy_class.__init__)

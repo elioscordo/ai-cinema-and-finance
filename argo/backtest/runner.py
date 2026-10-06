@@ -20,11 +20,19 @@ from nautilus_trader.model.identifiers import TraderId, Venue
 from nautilus_trader.model.objects import Money
 from django.conf import settings
 from argo.backtest.data_loader import BacktestDataLoader
-from argo.backtest.results import BacktestResult
-
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
 
 logger = logging.getLogger("argo.backtest")
+
+
+class ResultDict(dict):
+    """
+    Performance result dictionary representing output of a backtest simulation run.
+    Inherits from dict and supports both dictionary indexing and attribute access.
+    """
+    __getattr__ = dict.get
+    __setattr__ = dict.__setitem__
+    __delattr__ = dict.__delitem__
 
 
 class NautilusInstrumentFactory:
@@ -73,11 +81,9 @@ class StrategyBacktestRunner:
         params_override: Optional[Dict[str, Any]] = None,
         backtest=None,
         save_run: bool = True,
-    ) -> BacktestResult:
+    ) -> ResultDict:
         """Executes a backtest for the specified StrategyInstance."""
-        instr_params = instance.get_instruments_as_params() or {}
         merged_params = {**(instance.params or {}), **(params_override or {})}
-        merged_params.update(instr_params)
         temp_log_dir = tempfile.mkdtemp(prefix="nautilus_run_log_")
 
         # Set up Python log capture covering entire run attached strictly to root logger
@@ -107,14 +113,17 @@ class StrategyBacktestRunner:
             for instr in instance.get_instruments():
                 n_instr = NautilusInstrumentFactory.create(instr)
                 catalog = ParquetDataCatalog(settings.HISTORICAL_ROOT)
+                nautilus_bar_type = instr.get_nautilus_bar_type(bar_type)
                 bars = catalog.bars(
-                    bar_type=instr.get_nautilus_bar_type(bar_type),
+                    bar_types=[nautilus_bar_type],
                     start=start,
                     end=end,
                 )
                 if bars:
                     engine.add_data(bars)
                     total_bars_count += len(bars)
+                    if not primary_bars:
+                        primary_bars = bars
             # Instantiate strategy via StrategyInstance model (zero parameter assumptions)
             strategy = instance.instantiate_strategy(params_override=merged_params, bar_type=bar_type)
             engine.add_strategy(strategy)
@@ -124,7 +133,8 @@ class StrategyBacktestRunner:
                 engine.run()
 
             # Compile performance result
-            result = self._compile_result(engine, instance, instrument, start, end, merged_params, primary_bars, total_bars_count)
+            instruments = instance.get_instruments() if instance else []
+            result = self._compile_result(engine, instance, instruments, start, end, merged_params, primary_bars, total_bars_count)
 
             if save_run:
                 # Harvest file logs from Nautilus
@@ -142,7 +152,7 @@ class StrategyBacktestRunner:
                 # Assemble complete log
                 final_log = self._assemble_log(
                     instance=instance,
-                    instrument=instrument,
+                    instruments=instruments,
                     start=start,
                     end=end,
                     bars_count=total_bars_count,
@@ -169,7 +179,7 @@ class StrategyBacktestRunner:
                     end=end,
                 )
                 if run_record:
-                    result = result.with_run_id(run_record.id)
+                    result["run_id"] = run_record.id
 
             return result
         finally:
@@ -338,13 +348,13 @@ class StrategyBacktestRunner:
         self,
         engine: BacktestEngine,
         instance,
-        instruments,
-        start,
-        end,
-        params,
-        bars,
+        instruments: list,
+        start: datetime.datetime,
+        end: datetime.datetime,
+        params: Dict[str, Any],
+        bars: list,
         total_bars_count: Optional[int] = None,
-    ) -> BacktestResult:
+    ) -> ResultDict:
         orders = engine.trader.generate_orders_report()
         fills = engine.trader.generate_order_fills_report()
         positions = engine.trader.generate_positions_report()
@@ -391,30 +401,33 @@ class StrategyBacktestRunner:
         sharpe, sortino, max_dd = self._calculate_risk_metrics(bars, total_pnl)
         calmar = (return_pct / max_dd) if max_dd > 0 else 0.0
 
-        return BacktestResult(
-            instance_id=instance.id,
-            strategy_name=instance.strategy_model.name if instance.strategy_model else "Unknown",
-            instrument_id=str(instruments[0].id),
-            start_time=start.strftime("%Y-%m-%d %H:%M"),
-            end_time=end.strftime("%Y-%m-%d %H:%M"),
-            initial_capital=self.starting_balance,
-            final_equity=final_equity,
-            total_pnl=total_pnl,
-            return_pct=return_pct,
-            annualized_return=return_pct * 1.5,
-            sharpe_ratio=sharpe,
-            sortino_ratio=sortino,
-            calmar_ratio=calmar,
-            max_drawdown_pct=max_dd,
-            max_drawdown_duration="12 bars",
-            profit_factor=profit_factor,
-            win_rate=win_rate,
-            total_trades=total_trades,
-            winning_trades=winning_trades,
-            losing_trades=losing_trades,
-            avg_trade_pnl=(total_pnl / total_trades) if total_trades > 0 else 0.0,
-            params=params,
-        )
+        primary_id = getattr(instruments[0], "instrument_id_str", str(instruments[0])) if instruments else "N/A"
+
+        return ResultDict({
+            "run_id": None,
+            "instance_id": getattr(instance, "id", None),
+            "strategy_name": instance.strategy_model.name if instance and instance.strategy_model else "Unknown",
+            "instrument_id": primary_id,
+            "start_time": start.strftime("%Y-%m-%d %H:%M"),
+            "end_time": end.strftime("%Y-%m-%d %H:%M"),
+            "initial_capital": self.starting_balance,
+            "final_equity": final_equity,
+            "total_pnl": total_pnl,
+            "return_pct": return_pct,
+            "annualized_return": return_pct * 1.5,
+            "sharpe_ratio": sharpe,
+            "sortino_ratio": sortino,
+            "calmar_ratio": calmar,
+            "max_drawdown_pct": max_dd,
+            "max_drawdown_duration": "12 bars",
+            "profit_factor": profit_factor,
+            "win_rate": win_rate,
+            "total_trades": total_trades,
+            "winning_trades": winning_trades,
+            "losing_trades": losing_trades,
+            "avg_trade_pnl": (total_pnl / total_trades) if total_trades > 0 else 0.0,
+            "params": params,
+        })
 
     def _calculate_risk_metrics(self, bars, total_pnl: float) -> Tuple[float, float, float]:
         if not bars:
@@ -516,12 +529,12 @@ class StrategyBacktestRunner:
     def _assemble_log(
         self,
         instance,
-        instrument,
+        instruments: list,
         start: datetime.datetime,
         end: datetime.datetime,
         bars_count: int,
         engine: BacktestEngine,
-        result: BacktestResult,
+        result: Dict[str, Any],
         python_log: str,
         nautilus_file_log: str,
         stdout_log: str,
@@ -535,16 +548,24 @@ class StrategyBacktestRunner:
         fills_count = len(fills) if fills is not None else 0
         pos_count = len(positions) if positions is not None else 0
 
+        total_pnl = float(result.get("total_pnl", 0.0))
+        return_pct = float(result.get("return_pct", 0.0))
+        win_rate = float(result.get("win_rate", 0.0))
+        sharpe = float(result.get("sharpe_ratio", 0.0))
+        sortino = float(result.get("sortino_ratio", 0.0))
+        max_dd = float(result.get("max_drawdown_pct", 0.0))
+        primary_id = getattr(instruments[0], "instrument_id_str", str(instruments[0])) if instruments else "N/A"
+
         header_lines = [
             "=" * 70,
             f"BACKTEST EXECUTION RUN LOG",
             f"Strategy Instance: {instance}",
-            f"Primary Instrument: {instrument.id}",
+            f"Primary Instrument: {primary_id}",
             f"Simulation Window: {start.strftime('%Y-%m-%d %H:%M')} -> {end.strftime('%Y-%m-%d %H:%M')} UTC",
             f"Bars Processed: {bars_count:,}",
             f"Execution Summary: Orders: {orders_count} | Fills: {fills_count} | Closed Positions: {pos_count}",
-            f"Performance: Net PnL: ${result.total_pnl:,.2f} ({result.return_pct:.2%}) | Win Rate: {result.win_rate:.1%}",
-            f"Risk Metrics: Sharpe: {result.sharpe_ratio:.2f} | Sortino: {result.sortino_ratio:.2f} | Max DD: {result.max_drawdown_pct:.2%}",
+            f"Performance: Net PnL: ${total_pnl:,.2f} ({return_pct:.2%}) | Win Rate: {win_rate:.1%}",
+            f"Risk Metrics: Sharpe: {sharpe:.2f} | Sortino: {sortino:.2f} | Max DD: {max_dd:.2%}",
             "=" * 70,
         ]
 
@@ -582,7 +603,7 @@ class StrategyBacktestRunner:
         code: str,
         log: str,
         html_report: str,
-        result: BacktestResult,
+        result: Dict[str, Any],
         start: datetime.datetime,
         end: datetime.datetime,
     ):
@@ -596,15 +617,15 @@ class StrategyBacktestRunner:
                 code=code,
                 log=log,
                 html_report=html_report,
-                total_pnl=Decimal(str(result.total_pnl)),
-                return_pct=result.return_pct,
-                sharpe_ratio=result.sharpe_ratio,
-                sortino_ratio=result.sortino_ratio,
-                calmar_ratio=result.calmar_ratio,
-                max_drawdown_pct=result.max_drawdown_pct,
-                profit_factor=result.profit_factor,
-                win_rate=result.win_rate,
-                total_trades=result.total_trades,
+                total_pnl=Decimal(str(result.get("total_pnl", 0.0))),
+                return_pct=float(result.get("return_pct", 0.0)),
+                sharpe_ratio=float(result.get("sharpe_ratio", 0.0)),
+                sortino_ratio=float(result.get("sortino_ratio", 0.0)),
+                calmar_ratio=float(result.get("calmar_ratio", 0.0)),
+                max_drawdown_pct=float(result.get("max_drawdown_pct", 0.0)),
+                profit_factor=float(result.get("profit_factor", 0.0)),
+                win_rate=float(result.get("win_rate", 0.0)),
+                total_trades=int(result.get("total_trades", 0)),
                 start_date=start,
                 end_date=end,
             )

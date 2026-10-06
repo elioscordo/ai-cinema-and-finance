@@ -10,7 +10,7 @@ Multi-instrument trend-following system:
 
 import datetime
 import logging
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
 
 from nautilus_trader.model.data import Bar, BarType
@@ -105,22 +105,40 @@ class ORBTrendFollowingStrategy(NautilusStrategy):
             f"Starting {self.__class__.__name__} with SP={self.sp_id}, ETF={self.etf_id}, "
             f"{len(self.underlying_ids)} underlyings, ORB={self.config.orb_minutes}m",
         )
-        for instr_id in self.all_instrument_ids:
+        for instr_id in dict.fromkeys(self.all_instrument_ids):
             bar_type = self._resolve_bar_type(instr_id)
             self.subscribe_bars(bar_type)
 
     def _resolve_bar_type(self, instr_id: InstrumentId) -> BarType:
-        instr_str = str(instr_id)
-        spec = self.config.bar_type
-        if "-" in spec:
-            first = spec.split("-", 1)[0]
-            if "." in first or "/" in first:
-                spec = spec.split("-", 1)[1]
-        full_spec = f"{instr_str}-{spec}"
-        try:
-            return BarType.from_str(full_spec)
-        except Exception:
-            return BarType.from_str(self.config.bar_type)
+        """Resolves a valid native Nautilus BarType for the given instrument."""
+        if isinstance(self.config.bar_type, BarType):
+            if self.config.bar_type.instrument_id == instr_id:
+                return self.config.bar_type
+            return BarType(instr_id, self.config.bar_type.spec, self.config.bar_type.aggregation_source)
+
+        raw = str(self.config.bar_type or "1-MINUTE").strip()
+        # Strip leading instrument prefix if present (e.g. 'AAPL.SMART-5-MINUTE-LAST-EXTERNAL')
+        if "-" in raw:
+            prefix = raw.split("-", 1)[0]
+            if "." in prefix or "/" in prefix:
+                raw = raw.split("-", 1)[1]
+
+        # Extract price type if specified, default to LAST
+        price_type = "LAST"
+        for pt in ("-LAST", "-MID", "-BID", "-ASK"):
+            if pt in raw:
+                price_type = pt.replace("-", "")
+                break
+
+        # Extract core timeframe spec (e.g. '5-MINUTE')
+        timeframe = raw
+        for token in ("-EXTERNAL", "-INTERNAL", "-LAST", "-MID", "-BID", "-ASK", "-BAR"):
+            timeframe = timeframe.replace(token, "")
+        timeframe = timeframe.strip("-") or "1-MINUTE"
+
+        # Reconstruct canonical Nautilus BarType: {instrument_id}-{timeframe}-{price_type}-EXTERNAL
+        full_spec = f"{instr_id}-{timeframe}-{price_type}-EXTERNAL"
+        return BarType.from_str(full_spec)
 
     def on_bar(self, bar: Bar):
         instr_id = bar.bar_type.instrument_id
