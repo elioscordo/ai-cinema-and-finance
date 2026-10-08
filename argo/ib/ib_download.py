@@ -1,6 +1,7 @@
 import asyncio
 import concurrent.futures
 import datetime
+import logging
 from typing import List, Optional, Tuple
 from django.conf import settings
 from nautilus_trader.adapters.interactive_brokers.client.client import InteractiveBrokersClient
@@ -8,6 +9,8 @@ from nautilus_trader.adapters.interactive_brokers.historical.client import Histo
 from nautilus_trader.core.datetime import dt_to_unix_nanos, unix_nanos_to_dt
 from nautilus_trader.model.data import Bar
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+logger = logging.getLogger("argo.ib_download")
 
 if not hasattr(InteractiveBrokersClient, "stop"):
     InteractiveBrokersClient.stop = InteractiveBrokersClient._stop
@@ -161,8 +164,8 @@ class IBDownloader:
             return dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
         return dt
 
-    @staticmethod
-    def get_next_chunk(catalog: ParquetDataCatalog, identifier: str, start, end, days: int = 7):
+    @classmethod
+    def get_next_chunk(cls, catalog: ParquetDataCatalog, identifier: str, start, end, days: int = 7):
         """Asks for remaining catalog gaps, skipping verified empty intervals and weekend closures."""
         missing = catalog.get_missing_intervals_for_request(
             dt_to_unix_nanos(start), dt_to_unix_nanos(end), Bar, identifier
@@ -172,8 +175,8 @@ class IBDownloader:
         empty = load_empty_intervals(settings.HISTORICAL_ROOT, identifier)
         is_crypto = "CRYPTO" in str(identifier).upper()
         for s_ns, e_ns in missing:
-            s = IBDownloader._to_naive(unix_nanos_to_dt(s_ns))
-            e = IBDownloader._to_naive(unix_nanos_to_dt(e_ns))
+            s = cls._to_naive(unix_nanos_to_dt(s_ns))
+            e = cls._to_naive(unix_nanos_to_dt(e_ns))
             if is_interval_empty(s, e, empty):
                 continue
             if not is_crypto and is_market_closure_gap(s, e):
@@ -188,8 +191,9 @@ class IBDownloader:
             return s, min(s + datetime.timedelta(days=days), e)
         return None
 
-    @staticmethod
+    @classmethod
     async def _fetch_and_record_chunk(
+        cls,
         client: HistoricInteractiveBrokersClient,
         catalog: ParquetDataCatalog,
         bar_type: str,
@@ -208,11 +212,7 @@ class IBDownloader:
             use_rth=use_rth,
         )
         if bars:
-            existing = catalog.get_intervals(Bar, identifier=bar_type)
-            if existing:
-                bars = [b for b in bars if not any(s <= b.ts_init <= e for s, e in existing)]
-        if bars:
-            catalog.write_data(bars)
+            catalog.write_data(bars, skip_disjoint_check=True)
             return bars
         now_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
         if c_end < now_utc:
@@ -231,6 +231,17 @@ class IBDownloader:
         catalog = ParquetDataCatalog(settings.HISTORICAL_ROOT)
         bar_type = instrument.get_nautilus_bar_type(bar_spec) if hasattr(instrument, "get_nautilus_bar_type") else bar_spec
         client = await self._connect_client()
+        try:
+            catalog.consolidate_data(
+                Bar,
+                identifier=bar_type,
+                start=start,
+                end=end,
+                ensure_contiguous_files=False,
+                deduplicate=True,
+            )
+        except Exception:
+            pass
         try:
             all_bars, cur_start = [], self._to_naive(start)
             target_end = self._to_naive(end)
@@ -252,6 +263,18 @@ class IBDownloader:
                     all_bars.extend(bars)
                     bar_type = str(bars[0].bar_type)
                 cur_start = c_end
+            if all_bars:
+                try:
+                    catalog.consolidate_data(
+                        Bar,
+                        identifier=bar_type,
+                        start=start,
+                        end=end,
+                        ensure_contiguous_files=False,
+                        deduplicate=True,
+                    )
+                except Exception as ex:
+                    logger.warning(f"Consolidation failed for {bar_type}: {ex}")
             return all_bars
         finally:
             await self._disconnect(client)

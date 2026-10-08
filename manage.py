@@ -5,8 +5,11 @@ import sys
 
 
 def main():
-    """Run administrative tasks."""
-    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'project.settings')
+    """Run administrative tasks.
+    It defaults to guillermo ai cinema
+    use project_argo.settings for finance
+    """
+    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'project_guillermo.settings')
     try:
         from django.core.management import execute_from_command_line
     except ImportError as exc:

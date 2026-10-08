@@ -24,7 +24,7 @@ import threading
 import time
 
 import django
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "argo_project.settings")
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "project_argo.settings")
 django.setup()
 
 

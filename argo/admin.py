@@ -331,7 +331,7 @@ class HistoricalDataAdmin(AjaxSectionAdminMixin, AjaxTaskModelAdmin, ModelAdmin)
 
     @admin.action(description=_("Verify & Restart IB Gateway"))
     def restart_ib_gateway_action(self, request, queryset):
-        from project.settings import TASK_TYPE_IB_GATEWAY_RESTART
+        from project_guillermo.settings import TASK_TYPE_IB_GATEWAY_RESTART
         from task.models import Task
         task = Task.objects.create(
             task_type=TASK_TYPE_IB_GATEWAY_RESTART,
@@ -609,8 +609,8 @@ class StrategyInstanceFilter(admin.SimpleListFilter):
 
 
 @admin.register(Instrument)
-class InstrumentAdmin(ModelAdmin):
-    list_display = ('symbol', 'exchange', 'currency', 'display_historical_data', 'display_groups')
+class InstrumentAdmin(ModelActionsAdminMixin, ModelAdmin):
+    list_display = ('symbol', 'exchange', 'primary_exchange', 'currency', 'display_historical_data', 'display_groups')
     list_filter = (InstrumentGroupFilter, StrategyInstanceFilter, 'exchange', 'currency')
     search_fields = (
         'symbol',

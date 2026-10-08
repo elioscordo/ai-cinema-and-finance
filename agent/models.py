@@ -21,7 +21,7 @@ from filer.models.imagemodels import Image as FilerImage
 from django.utils.text import slugify
 from easy_thumbnails.files import get_thumbnailer
 from google.auth.credentials import AnonymousCredentials
-from project.settings import TASK_TYPE_GENERATE_SCENE, TASK_TYPE_GENERATE_SCENE_ACTIONS, TASK_TYPE_GENERATE_TEXT, TASK_TYPE_GENERATE_VOICE
+from project_guillermo.settings import TASK_TYPE_GENERATE_SCENE, TASK_TYPE_GENERATE_SCENE_ACTIONS, TASK_TYPE_GENERATE_TEXT, TASK_TYPE_GENERATE_VOICE
 from task.models import Task, TaskHolder
 from PIL import Image
 

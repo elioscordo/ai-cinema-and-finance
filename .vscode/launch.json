@@ -12,10 +12,10 @@
                 "runserver",
                 "127.0.0.1:8000",
                 "--noreload",
-                "--settings=argo_project.settings"
+                "--settings=project_argo.settings"
             ],
             "env": {
-                "DJANGO_SETTINGS_MODULE": "argo_project.settings"
+                "DJANGO_SETTINGS_MODULE": "project_argo.settings"
             },
             "django": false,
             "justMyCode": true,
@@ -30,10 +30,10 @@
                 "test",
                 "argo.tests.test_ib.SearchTest.test_search_create",
                 "--keepdb",
-                "--settings=argo_project.settings"
+                "--settings=project_argo.settings"
             ],
             "env": {
-                "DJANGO_SETTINGS_MODULE": "argo_project.settings"
+                "DJANGO_SETTINGS_MODULE": "project_argo.settings"
             },
             "django": true,
             "autoStartBrowser": false,
@@ -47,10 +47,10 @@
                 "test",
                 "argo.tests.test_ib.HistoricTest.test_load_data",
                 "--keepdb",
-                "--settings=argo_project.settings"
+                "--settings=project_argo.settings"
             ],
             "env": {
-                "DJANGO_SETTINGS_MODULE": "argo_project.settings"
+                "DJANGO_SETTINGS_MODULE": "project_argo.settings"
             },
             "django": true,
             "autoStartBrowser": false,
@@ -64,10 +64,10 @@
                 "test",
                 "argo.tests.test_backtest.TestBacktest.test_run_breakout",
                 "--keepdb",
-                "--settings=argo_project.settings"
+                "--settings=project_argo.settings"
             ],
             "env": {
-                "DJANGO_SETTINGS_MODULE": "argo_project.settings"
+                "DJANGO_SETTINGS_MODULE": "project_argo.settings"
             },
             "django": true,
             "autoStartBrowser": false,
@@ -82,7 +82,7 @@
             "cwd": "${workspaceFolder}",
             "args": [
                 "-A",
-                "argo_project.celery_app",
+                "project_argo.celery_app",
                 "worker",
                 "-l",
                 "info",
@@ -95,7 +95,7 @@
                 "argo"
             ],
             "env": {
-                "DJANGO_SETTINGS_MODULE": "argo_project.settings"
+                "DJANGO_SETTINGS_MODULE": "project_argo.settings"
             }
         },
         {
@@ -107,7 +107,7 @@
             "cwd": "${workspaceFolder}",
             "args": [
                 "-A",
-                "argo_project.celery_app",
+                "project_argo.celery_app",
                 "beat",
                 "-l",
                 "info",
@@ -118,7 +118,7 @@
                 "--pidfile=celerybeat-argo.pid"
             ],
             "env": {
-                "DJANGO_SETTINGS_MODULE": "argo_project.settings"
+                "DJANGO_SETTINGS_MODULE": "project_argo.settings"
             }
         },
         {
@@ -128,10 +128,10 @@
             "args": [
                 "makemigrations",
                 "argo",
-                "--settings=argo_project.settings"
+                "--settings=project_argo.settings"
             ],
             "env": {
-                "DJANGO_SETTINGS_MODULE": "argo_project.settings"
+                "DJANGO_SETTINGS_MODULE": "project_argo.settings"
             },
             "django": true,
             "autoStartBrowser": false,
@@ -143,10 +143,10 @@
             "request": "launch",
             "args": [
                 "migrate",
-                "--settings=argo_project.settings"
+                "--settings=project_argo.settings"
             ],
             "env": {
-                "DJANGO_SETTINGS_MODULE": "argo_project.settings"
+                "DJANGO_SETTINGS_MODULE": "project_argo.settings"
             },
             "django": true,
             "autoStartBrowser": false,
@@ -159,10 +159,10 @@
             "console": "integratedTerminal",
             "args": [
                 "createsuperuser",
-                "--settings=argo_project.settings"
+                "--settings=project_argo.settings"
             ],
             "env": {
-                "DJANGO_SETTINGS_MODULE": "argo_project.settings"
+                "DJANGO_SETTINGS_MODULE": "project_argo.settings"
             },
             "django": true,
             "program": "${workspaceFolder}/manage.py"
@@ -198,7 +198,7 @@
             "cwd": "${workspaceFolder}",
             "args": [
                 "-A",
-                "project.celery_app",
+                "project_guillermo.celery_app",
                 "worker",
                 "-l",
                 "info",
@@ -211,7 +211,7 @@
                 "guillermo,queue.normal,queue.heavy"
             ],
             "env": {
-                "DJANGO_SETTINGS_MODULE": "project.settings"
+                "DJANGO_SETTINGS_MODULE": "project_guillermo.settings"
             }
         },
         {
@@ -223,7 +223,7 @@
             "cwd": "${workspaceFolder}",
             "args": [
                 "-A",
-                "project.celery_app",
+                "project_guillermo.celery_app",
                 "beat",
                 "-l",
                 "info",
@@ -234,7 +234,7 @@
                 "--pidfile=celerybeat-guillermo.pid"
             ],
             "env": {
-                "DJANGO_SETTINGS_MODULE": "project.settings"
+                "DJANGO_SETTINGS_MODULE": "project_guillermo.settings"
             }
         },
         {

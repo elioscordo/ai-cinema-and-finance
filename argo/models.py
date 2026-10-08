@@ -1364,6 +1364,13 @@ class Instrument(models.Model):
     """
     Generalized financial instrument metadata for backtesting and execution.
     """
+    ACTION_SYNC_IB =  f"{settings.TASK_EXECUTE_FUNC}-func-create_instruments"
+    ACTION_CHOICES = (
+        (ACTION_SYNC_IB, _("Sync Interactive Brokers Data")),
+    ) + getattr(settings, 'COMMON_TEXT_ACTION_CHOICES', ())
+    
+    ACTIONS_NO_INPUT = (ACTION_SYNC_IB, )
+    
     groups = models.ManyToManyField(InstrumentGroup, related_name='linked_instruments', blank=True)
     symbol = models.CharField(max_length=64, db_index=True)
     # IB contract fields
@@ -1433,3 +1440,12 @@ class Instrument(models.Model):
         if group:
             instance.groups.add(group)
         instance.save()
+    
+    @staticmethod  
+    def sync_from_ib(self):
+        if self.ib_contract is None and "contract" in self.payload_ib:
+            contract = self.payload_ib["contract"]
+            for key in contract.keys():
+                if hasattr(self, key):
+                    setattr(self, key, contract[key])
+                    

@@ -25,4 +25,4 @@ COPY . .
 # Run the web service on container startup. 
 # We use gunicorn as the production-grade web server.
 # Change 'guillermo.wsgi' to your actual project name if different.
-CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 0 guillermo.wsgi:application
+CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 0 project_guillermo.wsgi:application

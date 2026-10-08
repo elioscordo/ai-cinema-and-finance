@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "argo-backtest": {
+      "command": "/home/elio/projects/guillermo/venv/bin/python",
+      "args": [
+        "/home/elio/projects/guillermo/argo/mcp/server.py"
+      ],
+      "env": {
+        "PYTHONPATH": "/home/elio/projects/guillermo",
+        "DJANGO_SETTINGS_MODULE": "project_argo.settings"
+      }
+    }
+  }
+}
