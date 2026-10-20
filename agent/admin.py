@@ -127,7 +127,8 @@ class PromptAdmin(SimpleHistoryAdmin, ModelAdmin):
 
 @admin.register(Agent)
 class AgentAdmin(ModelAdmin,):
-    list_display = ('name', 'output_type', 'schema')
+    list_display = ('name', 'type', 'output_type', 'schema')
+    list_filter = ('type', 'output_type')
     list_display_links = ('name',)
     search_fields = ['name']
 

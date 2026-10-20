@@ -62,7 +62,6 @@ INSTALLED_APPS = [
     'scene.apps.SceneConfig',
     'agent.apps.AgentConfig',
     'task',
-    'argo.apps.ArgoConfig',
     'import_export',
     'unfold.contrib.import_export',
     'django_celery_beat',

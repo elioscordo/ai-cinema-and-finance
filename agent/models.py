@@ -27,6 +27,7 @@ from PIL import Image
 
 from google.auth.credentials import Credentials
 from simple_history.models import HistoricalRecords
+from agent.mixins import AgentFlowMixin
 
 # Create a mock credential that satisfies all internal SDK token fetches
 class MockVertexCredentials(Credentials):
@@ -44,6 +45,7 @@ class GetContentsMixin:
     PRESET_REFINE = "refine"
     PRESET_VIDEO = "video_image"
     PRESET_OMNI_VIDEO = "omni_video"
+    PRESET_FLOW_VIDEO = "flow_video"
     PRESET_VIDEO_FIRST_LAST = "video_first_last"
     PRESET_COMIC = "comic"
     PRESET_VOICE = "voice"
@@ -258,6 +260,12 @@ class GetContentsMixin:
         self.video = agent.generate(self, preset=preset, user=user, target_field="video")
         pass
 
+    def generate_flow_video(self, preset, user=None):
+        from agent.tasks import FlowTask
+        task = Task(subject=self, owner=user)
+        FlowTask(task).process()
+        return self.video
+
     def generate_voice(self, preset, user=None, target_field="audio_voice"):
         agent = self.get_agent(Agent.OUTPUT_TYPE_VOICE)
         out = agent.generate(self, preset=preset, user=user, target_field=target_field)
@@ -397,6 +405,7 @@ class Prompt(models.Model):
         (GetContentsMixin.PRESET_CHARACTER, _("Character")),
         (GetContentsMixin.PRESET_REFINE_PROMPT, _("Refine Prompt")),
         (GetContentsMixin.PRESET_SYNC_SCENE, _("Sync Scene")),
+        (GetContentsMixin.PRESET_FLOW_VIDEO, _("Flow Video")),
     )
     
     name= models.CharField(_("name"), max_length=100, default="name")
@@ -442,7 +451,15 @@ class Prompt(models.Model):
         return "{}".format(self.name)
 
     
-class Agent(models.Model):
+class Agent(AgentFlowMixin, models.Model):
+    TYPE_GEMINI = "gemini"
+    TYPE_FLOW = "flow"
+
+    TYPE_CHOICES = [
+        (TYPE_GEMINI, _("Gemini")),
+        (TYPE_FLOW, _("Flow")),
+    ]
+
     OUTPUT_TYPE_IMAGE = "image"
     OUTPUT_TYPE_TEXT = "text"
     OUTPUT_TYPE_VOICE = "voice"
@@ -453,6 +470,12 @@ class Agent(models.Model):
 
     
     name = models.CharField(_("name"), max_length=100, default="name")
+    type = models.CharField(
+        _("type"),
+        max_length=50,
+        default=TYPE_GEMINI,
+        choices=TYPE_CHOICES,
+    )
     instructions = models.ManyToManyField("Prompt", verbose_name=_("instructions"), related_name='agents', blank=True)
     agent_model = models.ForeignKey(AgentModel, verbose_name=_("agent model"), related_name='agents', on_delete=models.CASCADE)
     agent_model_enterprise = models.ForeignKey(AgentModel, verbose_name=_("agent model"),blank=True, null=True,  related_name='enterprise_agents', on_delete=models.CASCADE)
@@ -572,6 +595,10 @@ class Agent(models.Model):
         return out
 
     def generate_image(self, preset, prompt_obj, message=None, user=None, contents=None):
+        if self.type == self.TYPE_FLOW:
+            if preset == GetContentsMixin.PRESET_REFINE:
+                return self.flow_refine_image(preset, prompt_obj, message=message, user=user, contents=contents)
+            return self.flow_generate_image(preset, prompt_obj, message=message, user=user, contents=contents)
         from google.genai import types
         instructions = self.get_instructions(user=user, preset=preset, obj=prompt_obj)
         message.set_instructions(instructions)
@@ -592,6 +619,11 @@ class Agent(models.Model):
             self.save_usage(user, response, obj=prompt_obj, preset=preset)
             out = self.save_image(response, prompt_obj)
         return out
+
+    def refine_image(self, preset, prompt_obj, message=None, user=None, contents=None):
+        if self.type == self.TYPE_FLOW:
+            return self.flow_refine_image(preset, prompt_obj, message=message, user=user, contents=contents)
+        return self.generate_image(preset, prompt_obj, message=message, user=user, contents=contents)
     
 
     def generate_image_omni_video(self, preset, prompt_obj,message=None, user=None, contents=None):
@@ -631,7 +663,9 @@ class Agent(models.Model):
                 return None
         
 
-    def generate_video(self, preset, prompt_obj, user=None, contents=None):
+    def generate_video(self, preset, prompt_obj, message=None, user=None, contents=None):
+        if self.type == self.TYPE_FLOW:
+            return self.flow_generate_video(preset, prompt_obj, message=message, user=user, contents=contents)
         # Check for errors if a video is not generated
         from google.genai import types
         out = None
@@ -791,7 +825,10 @@ class Agent(models.Model):
         elif self.output_type == self.OUTPUT_TYPE_VOICE:
             out = self.generate_voice(preset, obj, message=message, user=user, contents=contents)
         elif self.output_type == self.OUTPUT_TYPE_IMAGE:
-            out = self.generate_image(preset, obj, message=message, user=user, contents=contents)
+            if preset == GetContentsMixin.PRESET_REFINE:
+                out = self.refine_image(preset, obj, message=message, user=user, contents=contents)
+            else:
+                out = self.generate_image(preset, obj, message=message, user=user, contents=contents)
         elif self.output_type == self.OUTPUT_TYPE_TEXT:
             out = self.generate_text(preset, obj, message=message, instructions=instructions,schema=schema, user=user, contents=contents)
         elif self.output_type == self.OUTPUT_TYPE_STRUCTURED:

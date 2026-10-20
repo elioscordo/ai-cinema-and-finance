@@ -395,7 +395,7 @@ class VideoActionAdmin(CurrentLanguageListMixin, ProxyHistoryAdminMixin, SimpleH
     list_display_links = ('name',)
     list_refresh = ['video_player']
     search_fields = ['name']
-    actions = ['generate_video', 'generate_video_first_last', 'generate_omni_video']
+    actions = ['generate_video', 'generate_video_first_last', 'generate_omni_video', 'generate_flow_video']
     fieldsets = ACTION_FIELDSETS
     list_sections = [MessageHistorySection]
 

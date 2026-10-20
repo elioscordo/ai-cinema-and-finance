@@ -1032,12 +1032,25 @@ class Action(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolder, M
             out = self.image   
         return out
 
+    def _build_flow_video_prompt(self):
+        base_prompt = (self.prompt_video or self.prompt or "").strip()
+        lang = (get_language() or 'en').replace('-', '_').split('_')[0]
+        dialogue = getattr(self, f"prompt_voice_{lang}", None) or self.prompt_voice
+        if self.actor and dialogue and f"@{self.actor.name}" not in base_prompt:
+            return f'@{self.actor.name.strip()} says: "{dialogue.strip()}" {base_prompt}'.strip()
+        return base_prompt
+
     def get_contents(self, generate_self=True, preset=None):
         from google.genai import types
-        if preset == self.PRESET_VIDEO or preset == self.PRESET_OMNI_VIDEO:
+        if preset == self.PRESET_FLOW_VIDEO:
+            contents = {
+                'prompt': self._build_flow_video_prompt(),
+                'image': self.image,
+            }
+        elif preset in (self.PRESET_VIDEO, self.PRESET_OMNI_VIDEO):
             contents = {}
-            contents['prompt'] = self.prompt_video
-            contents['image'] = self.image
+            contents['prompt'] = self.prompt_video or self.prompt
+            contents['image'] = self.image_comic or self.image
         elif preset == self.PRESET_VIDEO_FIRST_LAST:
             contents = {}
             contents['prompt'] = self.prompt_video
@@ -1094,6 +1107,14 @@ class ActionOrganizer(Action):
         verbose_name_plural = _('Shot Organizers')
 
 class VideoAction(Action):
+
+    ACTION_FLOW_VIDEO = 'flow_video'
+    ACTION_OMNI_VIDEO = 'omni_video'
+    ACTION_CHOICES = (
+        (ACTION_FLOW_VIDEO, _("Create omni video")),  
+        (ACTION_OMNI_VIDEO, _("Edit flow video")), 
+     ) + settings.COMMON_TEXT_ACTION_CHOICES
+    
     class Meta:
         proxy = True
         verbose_name = _('Video Shot ')
@@ -1158,18 +1179,13 @@ class Render(RenderTypeMixin, models.Model, TaskHolder, ModelDisplayMixin):
         )
 
         lang = (self.language or 'en').replace('-', '_').split('_')[0]
-
-        if self.render_type == self.RENDER_TYPE_FILM:
-            item.video = action.video
-        elif self.render_type == self.RENDER_TYPE_ANIMATIC:
-            audio = getattr(action, f"audio_voice_{lang}", None) or action.audio_voice
-            item.audio = audio
-            comic_img = getattr(action, f"image_comic_{lang}", None) or action.image_comic
-            item.image = comic_img or action.image
-        elif self.render_type == self.RENDER_TYPE_GRAPHIC_NOVEL:
-            comic_img = getattr(action, f"image_comic_{lang}", None) or action.image_comic
-            item.image = comic_img or action.image
-
+        item.video = action.video
+        audio = getattr(action, f"audio_voice_{lang}", None) or action.audio_voice
+        item.audio = audio
+        comic_img = getattr(action, f"image_comic_{lang}", None) or action.image_comic
+        item.image = comic_img or action.image
+        comic_img = getattr(action, f"image_comic_{lang}", None) or action.image_comic
+        item.image = comic_img or action.image
         item.save()
         return item
     def get_conf(self, key):

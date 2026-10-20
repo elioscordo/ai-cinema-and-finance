@@ -567,6 +567,13 @@ class AdminActionsMixin:
                 obj.generate_omni_video(obj.PRESET_OMNI_VIDEO, user=request.user)
             self.message_user(request, "omni video generated for item ID {}.".format(obj.id))
 
+    @action(description=_("Flow Video"), icon="videocam")
+    def generate_flow_video(self, request, queryset):
+        for obj in queryset:
+            if Task.createTaskIfQueueEnabled(obj, settings.TASK_TYPE_FLOW, owner=request.user) is None:
+                obj.generate_flow_video(obj.PRESET_FLOW_VIDEO, user=request.user)
+            self.message_user(request, "flow video generated for item ID {}.".format(obj.id))
+
     @action(description=_("Generate Voice"), icon="record_voice_over")
     def generate_voice(self, request, queryset):
         lang = (get_language() or 'en').replace('-', '_').split('_')[0]

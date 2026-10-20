@@ -122,6 +122,19 @@
             }
         },
         {
+            "name": "Argo: MCP Server",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/argo/mcp/server.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "DJANGO_SETTINGS_MODULE": "project_argo.settings",
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "justMyCode": true
+        },
+        {
             "name": "Argo MakeMigration",
             "type": "debugpy",
             "request": "launch",
@@ -270,7 +283,12 @@
             "django": true,
             "program": "${workspaceFolder}/manage.py"
         },
-
-        
+        {
+            "name": "flow bridge",
+            "type": "node-terminal",
+            "request": "launch",
+            "command": "./bin/flow-linux bridge",
+            "cwd": "${workspaceFolder}/agent/services/flow-agent/flow-agent"
+        }
     ]
 }

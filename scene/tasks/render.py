@@ -73,12 +73,8 @@ class VideoRender:
 
         for render_item in item.render_items.all():
             clip = None
-            if item.render_type == item.RENDER_TYPE_FILM:
-                if render_item.video:
-                    clip = VideoFileClip(render_item.video.path, audio=True)
-                else:
-                    self.task.log(f"Render item {render_item.order} skipped: Missing video file for Film render.")
-
+            if render_item.video:
+                clip = VideoFileClip(render_item.video.path, audio=True)
             elif item.render_type == item.RENDER_TYPE_ANIMATIC:
                 if render_item.image and render_item.audio:
                     audio_path = render_item.audio.path # Default to original
