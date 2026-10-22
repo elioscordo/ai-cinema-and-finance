@@ -135,6 +135,7 @@ celerybeat.pid
 *.sage.py
 historical_data/
 # Environments
+.rem
 .env
 .envrc
 .venv

@@ -10,9 +10,6 @@ SHELL := /bin/bash
 -include .env
 export
 
-REMOTE_PORT ?= 22
-REMOTE_PROJECT_DIR ?= /home/elio/projects/guillermo
-REMOTE_MEDIA_DIR ?= /home/elio/media/guillermo
 
 # Allow passing positional arguments without make treating them as missing targets
 KNOWN_TARGETS := help install migrate migrations run worker shell superuser clean \
@@ -20,6 +17,7 @@ KNOWN_TARGETS := help install migrate migrations run worker shell superuser clea
                  save_db_argo save_db_guillermo load_db_argo load_db_guillermo \
                  db_new_argo db_new_guillermo ib-recreate refresh ib \
                  local_push local_push_media local_push_historical local_push_dbs
+				 
 EXTRA_ARGS := $(filter-out $(KNOWN_TARGETS),$(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS)))
 $(if $(EXTRA_ARGS),$(eval $(EXTRA_ARGS):;@:))
 ARG := $(word 2,$(MAKECMDGOALS))
@@ -90,7 +88,7 @@ db-create:
 	sudo -u postgres createdb guillermo
 
 db_new_guillermo:
-	sudo -u postgres createdb $(or $(ARG),guillermo)
+	sudo -u postgres createdb $(or $(ARG), guillermo)
 
 db_new_argo:
 	sudo -u postgres createdb $(or $(ARG),argo)
@@ -158,6 +156,7 @@ local_push_dbs: check_remote_env
 	@echo "==> Syncing project_argo/dbs to $(REMOTE_USER)@$(REMOTE_HOST):$(REMOTE_PROJECT_DIR)/project_argo/dbs/..."
 	ssh -p $(REMOTE_PORT) $(REMOTE_USER)@$(REMOTE_HOST) "mkdir -p $(REMOTE_PROJECT_DIR)/project_argo/dbs"
 	rsync -avz --progress -e "ssh -p $(REMOTE_PORT)" project_argo/dbs/ $(REMOTE_USER)@$(REMOTE_HOST):$(REMOTE_PROJECT_DIR)/project_argo/dbs/
+	rsync -avz --progress -e "ssh -p $(REMOTE_PORT)" project_guillermo/dbs/ $(REMOTE_USER)@$(REMOTE_HOST):$(REMOTE_PROJECT_DIR)/project_guillermo/dbs/
 
 local_push: check_remote_env
 	@TARGET="$(ARG)"; \
