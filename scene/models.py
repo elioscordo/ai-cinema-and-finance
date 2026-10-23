@@ -58,7 +58,9 @@ class Style(models.Model, GetContentsMixin, ModelDisplayMixin):
 class Preset(models.Model):
     name = models.CharField(_("name"), null=True, blank=True)
     preset = models.JSONField(_("preset"), null=True, blank=True)
-    
+
+    def __str__(self):
+        return "{}".format(self.name)    
 
 class Author(models.Model, UserCreatorMixin):
     story = models.ForeignKey('scene.Story', verbose_name=_("story"), related_name='authors', on_delete=models.CASCADE, null=True, blank=True)

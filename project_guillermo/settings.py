@@ -20,8 +20,6 @@ BASE_DIR = PROJECT_DIR.parent
 
 load_dotenv(dotenv_path=os.path.join(PROJECT_DIR, '.env'), override=True)
 GOOGLE_GENAI_VERTEX_API_KEY= os.getenv("GOOGLE_GENAI_VERTEX_API_KEY")
-IB_HOST = os.getenv("IB_HOST", os.getenv("IB_EXAMPLE_HOST", "127.0.0.1"))
-IB_PORT = int(os.getenv("IB_PORT", os.getenv("IB_EXAMPLE_PORT", "4002")))
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 MEDIA_ROOT = os.getenv("MEDIA_ROOT", os.path.join(BASE_DIR, 'media'))
@@ -609,12 +607,6 @@ SYSTEM_PRESETS = [
     PRESET_INSTRUCTION,
 ]
 
-# --- Argo Trading & Historical Data Settings ---
-HISTORICAL_ROOT = os.path.join(BASE_DIR, 'historical_data')
-IB_HOST = os.environ.get('IB_HOST', '127.0.0.1')
-IB_PORT = int(os.environ.get('IB_PORT', 4002))
-IB_GATEWAY_CONTAINER = os.environ.get('IB_GATEWAY_CONTAINER', 'ib-gateway')
-DOCKER_SOCKET_PATH = os.environ.get('DOCKER_SOCKET_PATH', '/var/run/docker.sock')
 
 # --- Session & Cookie Isolation (prevents collision across localhost ports) ---
 SESSION_COOKIE_NAME = 'guillermo_sessionid'

@@ -77,7 +77,7 @@ class GetContentsMixin:
     ]
 
     STATIC_CONFIG = {
-        CONFIG_ASPECT_RATIO: ASPECT_RATIO_9_16,
+        CONFIG_ASPECT_RATIO: ASPECT_RATIO_16_9,
     }
 
 

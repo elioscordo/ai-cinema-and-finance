@@ -2,7 +2,7 @@
         install-postgres install-redis redis-start redis-stop db-shell db-create \
         save_db_argo save_db_guillermo load_db_argo load_db_guillermo \
         db_new_argo db_new_guillermo ib-recreate refresh ib \
-        local_push local_push_media local_push_historical local_push_dbs
+        local_push local_push_media local_push_historical local_push_dbs local_push_env
 
 SHELL := /bin/bash
 
@@ -16,7 +16,7 @@ KNOWN_TARGETS := help install migrate migrations run worker shell superuser clea
                  install-postgres install-redis redis-start redis-stop db-shell db-create \
                  save_db_argo save_db_guillermo load_db_argo load_db_guillermo \
                  db_new_argo db_new_guillermo ib-recreate refresh ib \
-                 local_push local_push_media local_push_historical local_push_dbs
+                 local_push local_push_media local_push_historical local_push_dbs local_push_env
 				 
 EXTRA_ARGS := $(filter-out $(KNOWN_TARGETS),$(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS)))
 $(if $(EXTRA_ARGS),$(eval $(EXTRA_ARGS):;@:))
@@ -42,7 +42,8 @@ help:
 	@echo "  save_db_argo          - Dump 'argo' to project_argo/dbs/<YYYY_MM_DD>.sql"
 	@echo "  load_db_guillermo <f> - Load SQL dump from project_guillermo/dbs/<f> (e.g. make load_db_guillermo 2026_10_20.sql)"
 	@echo "  load_db_argo <f>      - Load SQL dump from project_argo/dbs/<f> (e.g. make load_db_argo 2026_10_20.sql)"
-	@echo "  local_push [target]   - Sync local data to remote server: media, historical, dbs, or all (default: all)"
+	@echo "  local_push [target]   - Sync local data to remote server: media, historical, dbs, env, or all (default: all)"
+	@echo "  local_push_env        - Sync local .rem files to remote .env (root, project_argo, project_guillermo)"
 	@echo "  clean                 - Remove python compiled files"
 	@echo "  refresh               - Pull git, collectstatic, migrate, and restart services"
 	@echo "  ib-recreate           - Force recreate stuck IB Gateway docker container"
@@ -158,6 +159,12 @@ local_push_dbs: check_remote_env
 	rsync -avz --progress -e "ssh -p $(REMOTE_PORT)" project_argo/dbs/ $(REMOTE_USER)@$(REMOTE_HOST):$(REMOTE_PROJECT_DIR)/project_argo/dbs/
 	rsync -avz --progress -e "ssh -p $(REMOTE_PORT)" project_guillermo/dbs/ $(REMOTE_USER)@$(REMOTE_HOST):$(REMOTE_PROJECT_DIR)/project_guillermo/dbs/
 
+local_push_env: check_remote_env
+	@echo "==> Syncing local .rem files to remote .env files..."
+	rsync -avz --progress -e "ssh -p $(REMOTE_PORT)" .rem $(REMOTE_USER)@$(REMOTE_HOST):$(REMOTE_PROJECT_DIR)/.env
+	rsync -avz --progress -e "ssh -p $(REMOTE_PORT)" project_argo/.rem $(REMOTE_USER)@$(REMOTE_HOST):$(REMOTE_PROJECT_DIR)/project_argo/.env
+	rsync -avz --progress -e "ssh -p $(REMOTE_PORT)" project_guillermo/.rem $(REMOTE_USER)@$(REMOTE_HOST):$(REMOTE_PROJECT_DIR)/project_guillermo/.env
+
 local_push: check_remote_env
 	@TARGET="$(ARG)"; \
 	case "$$TARGET" in \
@@ -167,13 +174,15 @@ local_push: check_remote_env
 			$(MAKE) local_push_historical ;; \
 		dbs|argo_dbs) \
 			$(MAKE) local_push_dbs ;; \
+		env|rem) \
+			$(MAKE) local_push_env ;; \
 		""|all|project) \
 			$(MAKE) local_push_media && \
 			$(MAKE) local_push_historical && \
 			$(MAKE) local_push_dbs ;; \
 		*) \
 			echo "Unknown target '$$TARGET'."; \
-			echo "Usage: make local_push [media | historical | dbs | all]"; \
+			echo "Usage: make local_push [media | historical | dbs | env | all]"; \
 			exit 1 ;; \
 	esac
 
@@ -194,3 +203,7 @@ refresh:
 
 ib:
 	@$(MAKE) -C argo recreate
+
+setup_ssh_key: check_remote_env
+	@test -f ~/.ssh/id_ed25519.pub || ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
+	ssh-copy-id -p $(REMOTE_PORT) $(REMOTE_USER)@$(REMOTE_HOST)
