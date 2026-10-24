@@ -4,7 +4,8 @@ from agent.models import Agent, Prompt
 from filer.fields.image import FilerImageField, FilerFileField
 from agent.models import GetContentsMixin, GoogleVoice
 from scene.mixins import (
-    EmailSenderMixin, UserCreatorMixin, ModelDisplayMixin, RenderTypeMixin, YAMLAssetsMixin
+    EmailSenderMixin, UserCreatorMixin, ModelDisplayMixin, RenderTypeMixin, YAMLAssetsMixin,
+    StoryConfigMixin
 )
 from .schemas import BackgroundSchema, CharacterSchema, PropSchema, VoiceSchema, GoogleVoiceSchema
 
@@ -207,6 +208,17 @@ class Story(AfterSaveActionMixin, RenderTypeMixin, YAMLAssetsMixin, models.Model
             out =  self.config.preset[key]
         return out
 
+    def get_aspect_ratio(self, model_name=None):
+        if not self.config or not self.config.preset:
+            return None
+        preset = self.config.preset
+        if model_name:
+            model_key = f"{self.CONFIG_ASPECT_RATIO}_{model_name}"
+            if model_key in preset:
+                return preset[model_key]
+        return preset.get(self.CONFIG_ASPECT_RATIO)
+
+
     def get_props(self):
         return Prop.objects.filter(story=self).order_by('name')
 
@@ -372,7 +384,7 @@ class Story(AfterSaveActionMixin, RenderTypeMixin, YAMLAssetsMixin, models.Model
         
         return parts
     
-class Scene(AfterSaveActionMixin, YAMLAssetsMixin, models.Model, TaskHolder, GetContentsMixin, ModelDisplayMixin):
+class Scene(AfterSaveActionMixin, YAMLAssetsMixin, models.Model, StoryConfigMixin, TaskHolder, GetContentsMixin, ModelDisplayMixin):
     
     TASK_TEXT_GENERATE = settings.TASK_TYPE_GENERATE_TEXT
     TASK_EXTRACT_SCENE = settings.TASK_TYPE_EXTRACT_SCENE
@@ -723,7 +735,7 @@ class Nudge(models.Model, EmailSenderMixin):
             )
 
 
-class Prop(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolder, ModelDisplayMixin):
+class Prop(AfterSaveActionMixin, models.Model, StoryConfigMixin, GetContentsMixin, TaskHolder, ModelDisplayMixin):
     name = models.CharField(_("name"), max_length=100, default="")
     image = FilerImageField(verbose_name=_("image"), null=True, blank=True, on_delete=models.SET_NULL, related_name='props')
     prompt= models.TextField(_("prompt"), null=True, blank=True)
@@ -791,7 +803,7 @@ class Voice(AfterSaveActionMixin, models.Model, TaskHolder, GetContentsMixin, Mo
             'voice': self.google_voice.name
         }
     
-class Character(models.Model, GetContentsMixin, TaskHolder, ModelDisplayMixin):
+class Character(models.Model, StoryConfigMixin, GetContentsMixin, TaskHolder, ModelDisplayMixin):
     name = models.CharField(_("name"), max_length=100, default="")
     image = FilerImageField(verbose_name=_("image"), null=True, blank=True, on_delete=models.SET_NULL, related_name='characters')
     prompt= models.TextField(_("prompt"), null=True, blank=True)
@@ -823,7 +835,7 @@ class Character(models.Model, GetContentsMixin, TaskHolder, ModelDisplayMixin):
         verbose_name_plural = _('Characters')
 
 
-class Background(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolder, ModelDisplayMixin):
+class Background(AfterSaveActionMixin, models.Model, StoryConfigMixin, GetContentsMixin, TaskHolder, ModelDisplayMixin):
     name = models.CharField(_("name"), max_length=100, default="")
     prompt= models.TextField(_("prompt"), null=True, blank=True)
     image = FilerImageField(verbose_name=_("image"), null=True, blank=True, on_delete=models.SET_NULL, related_name='backgrounds')
@@ -836,12 +848,6 @@ class Background(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolde
     TASK_TYPE_CHOICES = settings.TASK_TYPE_CHOICES
     action = models.SlugField(_("action"), choices=settings.TASK_TYPE_CHOICES, null=True, blank=True)
 
-
-    def config(self, field_name, default=None):
-        if field_name == self.CONFIG_ASPECT_RATIO:
-            return self.ASPECT_RATIO_16_9
-        return super().config(field_name, default=default)
-    
     def __str__(self):
         return "{}".format(self.name)
 
@@ -920,7 +926,7 @@ class StoryProfile(models.Model):
             story = self.scene.story
         return story
 
-class Action(AfterSaveActionMixin, models.Model, GetContentsMixin, TaskHolder, ModelDisplayMixin):
+class Action(AfterSaveActionMixin, models.Model, StoryConfigMixin, GetContentsMixin, TaskHolder, ModelDisplayMixin):
     
     IS_INTRO_CHOICES = [
         ('scene', _('Scene Intro')),

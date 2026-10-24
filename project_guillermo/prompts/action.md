@@ -1,0 +1,1 @@
+[Full screen, no boundaries, edge-to-edge frame, no letterboxing, seamless image, filling the entire canvas, no padding, no borders, no negative space, full bleed composition.]

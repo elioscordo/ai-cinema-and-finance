@@ -25,6 +25,7 @@ GOOGLE_GENAI_VERTEX_API_KEY= os.getenv("GOOGLE_GENAI_VERTEX_API_KEY")
 MEDIA_ROOT = os.getenv("MEDIA_ROOT", os.path.join(BASE_DIR, 'media'))
 MEDIA_URL = '/media/'
 HISTORICAL_ROOT = os.getenv("HISTORICAL_ROOT", os.path.join(BASE_DIR, "historical_data"))
+PROMPT_ROOT = os.getenv("PROMPT_ROOT", os.path.join(PROJECT_DIR, "prompts"))
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/

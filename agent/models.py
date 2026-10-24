@@ -423,18 +423,38 @@ class Prompt(models.Model):
         verbose_name_plural = _('Prompts')
 
     @classmethod
+    def prompt_from_root(cls, name):
+        prompt_root = getattr(settings, 'PROMPT_ROOT', None)
+        if not prompt_root:
+            return None
+        file_path = os.path.join(prompt_root, f"{name}.md")
+        if os.path.exists(file_path):
+            with open(file_path, "r", encoding="utf-8") as f:
+                return f.read()
+        return None
+
+    @classmethod
     def instructions(cls, preset, obj):
+        from_preset = [item.prompt for item in cls.objects.filter(category=preset, is_global=True)]
+        from_preset.extend([item.prompt for item in cls.get_from_categories(preset)])
 
-        from_preset =  [item.prompt for item in cls.objects.filter(category=preset, is_global=True) ]
-        from_preset.extend([item.prompt for item in cls.get_from_categories(preset) ])
-
+        model_name = obj._meta.model_name if hasattr(obj, '_meta') else obj.__class__.__name__.lower()
         content_type = ContentType.objects.get_for_model(obj.__class__)
         from_content = [item.prompt for item in cls.objects.filter(content_types=content_type, is_global=True)]
         out = from_preset + from_content
         if hasattr(obj, 'get_instructions') and obj.get_instructions:
             obj_instrs = [item.prompt for item in obj.get_instructions(preset)]
             out.extend(obj_instrs)
+
+        out = [p for p in out if p and str(p).strip() != ""]
+        if not out:
+            preset_fallback = cls.prompt_from_root(preset) if preset else None
+            model_fallback = cls.prompt_from_root(model_name) if model_name else None
+            fallbacks = [fb for fb in [preset_fallback, model_fallback] if fb]
+            if fallbacks:
+                out = fallbacks
         return out
+
 
     @classmethod
     def prompt_for_model(cls, obj):

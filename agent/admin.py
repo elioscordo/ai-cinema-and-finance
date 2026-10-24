@@ -1,3 +1,5 @@
+import os
+from django.conf import settings
 from django.contrib import admin
 from unfold.admin import ModelAdmin, StackedInline
 from django import forms
@@ -100,6 +102,68 @@ class PromptAdmin(SimpleHistoryAdmin, ModelAdmin):
     autocomplete_fields = ('content_types', 'categories')
     search_fields = ("name", "prompt")
     ordering_field = "order"
+    actions = ['save_prompts_to_root', 'load_prompts_from_root']
+
+    def _get_prompt_root(self):
+        root = getattr(settings, 'PROMPT_ROOT', None)
+        if root:
+            os.makedirs(root, exist_ok=True)
+        return root
+
+    def _get_target_filenames(self, prompt_obj):
+        targets = set()
+        if prompt_obj.category and prompt_obj.category != "general":
+            targets.add(f"{prompt_obj.category}.md")
+        for cat in prompt_obj.categories.all():
+            if cat.slug:
+                targets.add(f"{cat.slug}.md")
+        for ct in prompt_obj.content_types.all():
+            if ct.model:
+                targets.add(f"{ct.model}.md")
+        if not targets and prompt_obj.category:
+            targets.add(f"{prompt_obj.category}.md")
+        return targets
+
+    @admin.action(description="Save prompts to PROMPT_ROOT (.md)")
+    def save_prompts_to_root(self, request, queryset):
+        root = self._get_prompt_root()
+        if not root:
+            self.message_user(request, "PROMPT_ROOT is not configured in settings.", level="error")
+            return
+
+        saved_files = 0
+        for prompt_obj in queryset:
+            for filename in self._get_target_filenames(prompt_obj):
+                file_path = os.path.join(root, filename)
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(prompt_obj.prompt or "")
+                saved_files += 1
+
+        self.message_user(request, f"Saved {saved_files} markdown prompt file(s) to PROMPT_ROOT.")
+
+    @admin.action(description="Load prompts from PROMPT_ROOT (.md)")
+    def load_prompts_from_root(self, request, queryset):
+        root = self._get_prompt_root()
+        if not root:
+            self.message_user(request, "PROMPT_ROOT is not configured in settings.", level="error")
+            return
+
+        loaded_count = 0
+        for prompt_obj in queryset:
+            loaded_content = None
+            for filename in self._get_target_filenames(prompt_obj):
+                file_path = os.path.join(root, filename)
+                if os.path.exists(file_path):
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        loaded_content = f.read()
+                    break
+
+            if loaded_content is not None:
+                prompt_obj.prompt = loaded_content
+                prompt_obj.save()
+                loaded_count += 1
+
+        self.message_user(request, f"Updated {loaded_count} prompt(s) from PROMPT_ROOT files.")
 
     def get_queryset(self, request):
         return super().get_queryset(request).prefetch_related('categories', 'content_types')

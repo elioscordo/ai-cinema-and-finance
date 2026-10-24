@@ -725,3 +725,24 @@ class ChangelistScrollToEditedMixin:
         if res.status_code in [301, 302] and '_continue' not in request.POST and '_addanother' not in request.POST:
             res['Location'] = f"{res['Location']}#id={obj.id}"
         return res
+
+
+class StoryConfigMixin:
+    """Delegates aspect ratio configuration to the associated story preset."""
+
+    def _get_story(self):
+        if hasattr(self, 'story') and self.story:
+            return self.story
+        if hasattr(self, 'scene') and self.scene and self.scene.story:
+            return self.scene.story
+        return None
+
+    def config(self, field_name, default=None):
+        if field_name == self.CONFIG_ASPECT_RATIO:
+            story = self._get_story()
+            if story:
+                aspect_ratio = story.get_aspect_ratio(self._meta.model_name)
+                if aspect_ratio:
+                    return aspect_ratio
+        return super().config(field_name, default=default)
+

@@ -11,6 +11,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 USE_TASK_QUEUE = True
 BASE_DIR = PROJECT_DIR.parent
 load_dotenv(dotenv_path=os.path.join(PROJECT_DIR, '.env'), override=True)
+PROMPT_ROOT = os.getenv("PROMPT_ROOT", os.path.join(PROJECT_DIR, "prompts"))
 
 IB_HOST = os.getenv("IB_HOST", os.getenv("IB_EXAMPLE_HOST", "127.0.0.1"))
 IB_PORT = int(os.getenv("IB_PORT", os.getenv("IB_EXAMPLE_PORT", "4002")))

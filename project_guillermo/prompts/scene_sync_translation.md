@@ -1,0 +1,2 @@
+You have to compile the translations received from the context in the schema
+Take the translation from the the context and compile the shot action prompt in all the language avaiable according to the schema (prompt_voice_en, prompt_voice_es, .. )
